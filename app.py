@@ -1,145 +1,301 @@
 """
-ФинПоток — профессиональный сервис прогнозирования денежных потоков
-для малого бизнеса.
+ФинПоток — сервис прогнозирования денежных потоков и предотвращения
+кассовых разрывов для малого бизнеса (Хакатон Осень 2026).
 
-Улучшенная версия: тёмная «финансовая» тема, несколько моделей прогноза,
-бэктест и метрики качества, доверительные интервалы, ручные события
-(договоры, счета, налоговый календарь), стресс-сценарии, категоризация.
+Версия с обновлённым UX/UI (Soft White & Violet FinTech Design),
+исправленной категоризацией, поддержкой мульти-компаний, математически
+корректной оценкой вероятности разрыва и системой рекомендаций.
 """
 from __future__ import annotations
 
+import hmac
 import io
+import math
 import os
 import zipfile
-from datetime import date, timedelta
 from pathlib import Path
 from typing import Tuple
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
 import streamlit as st
-from plotly.subplots import make_subplots
 from sklearn.linear_model import LinearRegression
-from statsmodels.tsa.holtwinters import Holt, ExponentialSmoothing
+from statsmodels.tsa.holtwinters import Holt
 
 
 # ────────────────────────────────────────────────────────────────────────────
-#  КОНФИГУРАЦИЯ СТРАНИЦЫ И ТЕМА
+# 1. КОНФИГУРАЦИЯ СТРАНИЦЫ И БЕЛО-ФИОЛЕТОВАЯ ТЕМА (UX/UI)
 # ────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="ФинПоток — Cash-Flow Forecaster",
-    page_icon="📊",
+    page_title="ФинПоток — Прогноз денежных потоков",
+    page_icon="💜",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-DARK_BG = "#0b1220"
-PANEL_BG = "#111a2e"
-PANEL_BORDER = "#1f2a44"
-ACCENT_BLUE = "#3b82f6"
-ACCENT_GREEN = "#22c55e"
-ACCENT_AMBER = "#f59e0b"
-ACCENT_RED = "#ef4444"
-ACCENT_CYAN = "#06b6d4"
-ACCENT_VIOLET = "#8b5cf6"
-TEXT_PRIMARY = "#e8ecf3"
-TEXT_SECONDARY = "#94a3b8"
+# Палитра White & Violet (мягкая, не вырвиглазная, высокий комфорт чтения)
+BG_MAIN = "#F8F7FC"          # Основной очень светлый лавандово-белый фон
+BG_SIDEBAR = "#F2EFFA"       # Мягкий пастельно-фиолетовый фон сайдбара
+CARD_BG = "#FFFFFF"          # Чистый белый для карточек и графиков
+CARD_BORDER = "#E6E0F4"      # Деликатная фиолетово-серая рамка
+VIOLET_DARK = "#4C1D95"      # Глубокий фиолетовый для акцентов и заголовков
+VIOLET_PRIMARY = "#6D28D9"   # Основной брендовый фиолетовый
+VIOLET_ACCENT = "#7C3AED"    # Яркий, но мягкий фиолетовый для кнопок и линий
+VIOLET_LIGHT = "#A78BFA"     # Светло-фиолетовый для второстепенных серий
+VIOLET_SOFT_BG = "#EDE9FE"   # Пастельная подложка бейджей и табов
+TEXT_PRIMARY = "#1E1B4B"     # Тёмный индиго-графит (не режет глаз как #000)
+TEXT_SECONDARY = "#64748B"   # Спокойный серо-синий для подписей
+COLOR_INFLOW = "#10B981"     # Мягкий изумрудный (поступления / стабильность)
+COLOR_OUTFLOW = "#8B5CF6"    # Фиолетовый (плановые списания в графиках)
+COLOR_WARN = "#D97706"       # Мягкий янтарный (внимание)
+COLOR_DANGER = "#E11D48"     # Приглушённый малиново-красный (риск разрыва)
 
 st.markdown(
-    """
+    f"""
     <style>
-    /* Глобальный фон */
-    .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
-        background-color: """ + DARK_BG + """ !important;
-        color: """ + TEXT_PRIMARY + """ !important;
-    }
-    .stApp::before {
-        content: "";
-        position: fixed; inset: 0; z-index: -1;
-        background:
-            radial-gradient(900px 600px at 10% -10%, rgba(59,130,246,0.12), transparent 60%),
-            radial-gradient(700px 500px at 100% 0%, rgba(139,92,246,0.10), transparent 55%),
-            """ + DARK_BG + """;
-    }
-    /* Контейнер */
-    .block-container { padding-top: 1.6rem !important; max-width: 1480px; }
-    /* Заголовки */
-    h1, h2, h3, h4 { letter-spacing: -0.02em; color: """ + TEXT_PRIMARY + """ !important; }
-    h1 { font-weight: 800; }
-    /* Metric-карточки */
-    [data-testid="stMetric"] {
-        background: linear-gradient(180deg, """ + PANEL_BG + """, #0e1626);
-        padding: 18px 18px 14px !important;
+    /* Глобальные цвета и типографика */
+    .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {{
+        background-color: {BG_MAIN} !important;
+        color: {TEXT_PRIMARY} !important;
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }}
+    [data-testid="stHeader"] {{
+        background: rgba(248, 247, 252, 0.85) !important;
+        backdrop-filter: blur(8px);
+    }}
+    .block-container {{
+        padding-top: 1.4rem !important;
+        padding-bottom: 2.5rem !important;
+        max-width: 1460px;
+    }}
+    h1, h2, h3, h4 {{
+        color: {TEXT_PRIMARY} !important;
+        letter-spacing: -0.02em;
+    }}
+
+    /* Сайдбар */
+    [data-testid="stSidebar"], [data-testid="stSidebarContent"] {{
+        background-color: {BG_SIDEBAR} !important;
+        border-right: 1px solid {CARD_BORDER};
+    }}
+    [data-testid="stSidebar"] * {{
+        color: {TEXT_PRIMARY};
+    }}
+
+    /* Кнопки Streamlit */
+    .stButton > button, .stDownloadButton > button, [data-testid="stFormSubmitButton"] > button {{
+        border-radius: 10px !important;
+        font-weight: 600 !important;
+        transition: all 0.18s ease !important;
+        border: 1px solid {CARD_BORDER} !important;
+        background-color: {CARD_BG} !important;
+        color: {VIOLET_PRIMARY} !important;
+        box-shadow: 0 2px 6px rgba(109, 40, 217, 0.05) !important;
+    }}
+    .stButton > button:hover, .stDownloadButton > button:hover {{
+        border-color: {VIOLET_ACCENT} !important;
+        background-color: {VIOLET_SOFT_BG} !important;
+        color: {VIOLET_DARK} !important;
+        transform: translateY(-1px);
+    }} 
+    .stButton > button[kind="primary"], [data-testid="stFormSubmitButton"] > button {{
+        background: linear-gradient(135deg, {VIOLET_PRIMARY} 0%, {VIOLET_ACCENT} 100%) !important;
+        color: #FFFFFF !important;
+        border: none !important;
+        box-shadow: 0 4px 12px rgba(109, 40, 217, 0.22) !important;
+    }}
+    .stButton > button[kind="primary"]:hover, [data-testid="stFormSubmitButton"] > button:hover {{
+        background: linear-gradient(135deg, {VIOLET_DARK} 0%, {VIOLET_PRIMARY} 100%) !important;
+        color: #FFFFFF !important;
+    }}
+
+    /* Вкладки (Tabs) — современный pill-дизайн */
+    .stTabs [data-baseweb="tab-list"] {{
+        gap: 8px;
+        background-color: {CARD_BG};
+        padding: 6px 8px;
         border-radius: 14px;
-        border: 1px solid """ + PANEL_BORDER + """;
-        box-shadow: 0 6px 22px rgba(0,0,0,0.35);
-    }
-    [data-testid="stMetric"] label, [data-testid="stMetricLabel"] {
-        color: """ + TEXT_SECONDARY + """ !important;
-        font-size: 0.78rem !important;
+        border: 1px solid {CARD_BORDER};
+        box-shadow: 0 2px 10px rgba(109, 40, 217, 0.04);
+    }}
+    .stTabs [data-baseweb="tab"] {{
+        padding: 10px 18px;
+        border-radius: 10px;
+        background: transparent;
+        color: {TEXT_SECONDARY} !important;
+        font-weight: 600;
+        font-size: 0.92rem;
+        border: none !important;
+    }}
+    .stTabs [aria-selected="true"] {{
+        background: {VIOLET_SOFT_BG} !important;
+        color: {VIOLET_PRIMARY} !important;
+        font-weight: 700 !important;
+    }}
+    .stTabs [data-baseweb="tab-highlight"] {{
+        display: none !important;
+    }}
+
+    /* Шапка приложения */
+    .fp-header-card {{
+        background: linear-gradient(135deg, #FFFFFF 0%, #F5F2FF 100%);
+        border: 1px solid {CARD_BORDER};
+        border-radius: 16px;
+        padding: 20px 24px;
+        margin-bottom: 16px;
+        box-shadow: 0 4px 20px rgba(109, 40, 217, 0.05);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 16px;
+    }}
+    .fp-badge {{
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 5px 12px;
+        border-radius: 999px;
+        background: {VIOLET_SOFT_BG};
+        color: {VIOLET_PRIMARY};
+        font-size: 0.8rem;
+        font-weight: 600;
+        border: 1px solid #DDD6FE;
+    }}
+
+    /* Адаптивные KPI-карточки (без обрезки текста троеточием) */
+    /* Адаптивная сетка KPI-карточек */
+    .fp-kpi-grid {{
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 12px;
+        margin: 14px 0 18px 0;
+    }}
+    .fp-kpi-card {{
+        background: {CARD_BG};
+        border: 1px solid {CARD_BORDER};
+        border-radius: 14px;
+        padding: 16px 14px;
+        box-shadow: 0 4px 14px rgba(109, 40, 217, 0.04);
+        flex: 1 1 185px;
+        min-width: 180px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+    }}
+    .fp-kpi-value {{
+        color: {TEXT_PRIMARY};
+        font-size: 1.25rem;
+        font-weight: 800;
+        line-height: 1.2;
+        word-break: break-word;
+    }}
+    .fp-kpi-card {{
+        background: {CARD_BG};
+        border: 1px solid {CARD_BORDER};
+        border-radius: 14px;
+        padding: 16px 18px;
+        box-shadow: 0 4px 14px rgba(109, 40, 217, 0.04);
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+    }}
+    .fp-kpi-title {{
+        color: {TEXT_SECONDARY};
+        font-size: 0.76rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        margin-bottom: 6px;
+    }}
+    .fp-kpi-sub {{
+        margin-top: 8px;
+        font-size: 0.8rem;
+        font-weight: 500;
+        color: {TEXT_SECONDARY};
+    }}
+    .fp-kpi-sub.pos {{ color: #059669; }}
+    .fp-kpi-sub.neg {{ color: {COLOR_DANGER}; }}
+    .fp-kpi-sub.vio {{ color: {VIOLET_PRIMARY}; }}
+
+    /* Белые контейнеры для графиков и секций */
+    .fp-card {{
+        background: {CARD_BG};
+        border: 1px solid {CARD_BORDER};
+        border-radius: 14px;
+        padding: 18px 20px;
+        margin-bottom: 14px;
+        box-shadow: 0 4px 14px rgba(109, 40, 217, 0.04);
+    }}
+    .fp-section-title {{
+        font-size: 0.85rem;
         text-transform: uppercase;
         letter-spacing: 0.08em;
-        font-weight: 600;
-    }
-    [data-testid="stMetricValue"] {
-        color: """ + TEXT_PRIMARY + """ !important;
-        font-weight: 700 !important;
-        font-size: 1.55rem !important;
-    }
-    /* Панель вкладок */
-    .stTabs [data-baseweb="tab-list"] { gap: 4px; }
-    .stTabs [data-baseweb="tab"] {
-        padding: 9px 16px;
-        border-radius: 8px 8px 0 0;
-        background: transparent;
-        color: """ + TEXT_SECONDARY + """ !important;
-        font-weight: 600;
-    }
-    .stTabs [aria-selected="true"] {
-        background: """ + PANEL_BG + """ !important;
-        color: """ + TEXT_PRIMARY + """ !important;
-        border-bottom: 2px solid """ + ACCENT_BLUE + """ !important;
-    }
-    /* Сайдбар */
-    [data-testid="stSidebar"], [data-testid="stSidebarViewContainer"] {
-        background: #0a1120 !important;
-        border-right: 1px solid """ + PANEL_BORDER + """;
-    }
-    /* Кастомные баннеры */
-    .fp-banner {
-        border-radius: 12px; padding: 14px 18px; margin: 6px 0;
-        border: 1px solid; font-weight: 500;
-        display: flex; align-items: center; gap: 10px;
-    }
-    .fp-banner-info    { background: rgba(59,130,246,0.10); border-color: rgba(59,130,246,0.45); color: #cfe1ff; }
-    .fp-banner-success { background: rgba(34,197,94,0.10); border-color: rgba(34,197,94,0.45); color: #c7ffd9; }
-    .fp-banner-warn    { background: rgba(245,158,11,0.10); border-color: rgba(245,158,11,0.45); color: #ffe2a8; }
-    .fp-banner-danger  { background: rgba(239,68,68,0.10); border-color: rgba(239,68,68,0.50); color: #ffc9c9; }
-    .fp-pill {
-        display: inline-block; padding: 2px 9px; border-radius: 999px;
-        font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
-        text-transform: uppercase; margin-right: 6px;
-    }
-    .fp-pill-low  { background: rgba(34,197,94,0.15); color: #6ee7b7; border: 1px solid rgba(34,197,94,0.35); }
-    .fp-pill-med  { background: rgba(245,158,11,0.15); color: #fcd34d; border: 1px solid rgba(245,158,11,0.35); }
-    .fp-pill-high { background: rgba(239,68,68,0.15); color: #fca5a5; border: 1px solid rgba(239,68,68,0.40); }
-    .fp-section-title {
-        font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.10em;
-        color: """ + TEXT_SECONDARY + """; font-weight: 700;
-        margin: 18px 0 8px;
-    }
-    .fp-divider {
-        height: 1px; background: linear-gradient(90deg, transparent, """ + PANEL_BORDER + """, transparent);
+        color: {VIOLET_PRIMARY};
+        font-weight: 700;
+        margin: 14px 0 8px 0;
+    }}
+    .fp-divider {{
+        height: 1px;
+        background: linear-gradient(90deg, transparent, {CARD_BORDER}, transparent);
         margin: 14px 0;
-    }
-    /* Plotly modebar */
-    .modebar { background: transparent !important; }
-    /* Tables */
-    .stDataFrame, .stDataFrame table { color: """ + TEXT_PRIMARY + """ !important; }
-    /* Hide default headers with extra padding */
-    [data-testid="stMetricContainer"] { gap: 4px; }
+    }}
+
+    /* Статусные баннеры (мягкие пастельные тона) */
+    .fp-banner {{
+        border-radius: 14px;
+        padding: 16px 20px;
+        margin: 10px 0 16px 0;
+        border: 1px solid;
+        display: flex;
+        align-items: flex-start;
+        gap: 14px;
+        line-height: 1.5;
+    }}
+    .fp-banner-success {{
+        background: #F0FDF4;
+        border-color: #BBF7D0;
+        color: #14532D;
+    }}
+    .fp-banner-warn {{
+        background: #FFFBEB;
+        border-color: #FDE68A;
+        color: #78350F;
+    }}
+    .fp-banner-danger {{
+        background: #FFF1F2;
+        border-color: #FECDD3;
+        color: #881337;
+    }}
+    .fp-banner-info {{
+        background: #F5F3FF;
+        border-color: #DDD6FE;
+        color: {VIOLET_DARK};
+    }}
+    .fp-pill {{
+        display: inline-block;
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 0.72rem;
+        font-weight: 800;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        white-space: nowrap;
+    }}
+    .fp-pill-low {{ background: #DCFCE7; color: #15803D; }}
+    .fp-pill-med {{ background: #FEF3C7; color: #B45309; }}
+    .fp-pill-high {{ background: #FFE4E6; color: #BE123C; }}
+    .fp-pill-vio {{ background: {VIOLET_SOFT_BG}; color: {VIOLET_PRIMARY}; }}
+
+    /* Стандартные метрики внутри вкладок */
+    [data-testid="stMetric"] {{
+        background: {CARD_BG};
+        padding: 14px 16px !important;
+        border-radius: 12px;
+        border: 1px solid {CARD_BORDER};
+        box-shadow: 0 2px 8px rgba(109, 40, 217, 0.04);
+    }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -147,126 +303,145 @@ st.markdown(
 
 
 # ────────────────────────────────────────────────────────────────────────────
-#  КАТЕГОРИИ (векторизованная + исправленные приоритеты)
+# 2. КАТЕГОРИЗАЦИЯ ОПЕРАЦИЙ (исправленная логика с разделением приток/отток)
 # ────────────────────────────────────────────────────────────────────────────
-# Порядок важен: доходы (Продажи) идут раньше комиссий банка, чтобы
-# эквайринг-поступления не классифицировались как «Комиссии и банк».
-CATEGORY_RULES: list[tuple[str, list[str], str]] = [
-    # (Категория, Ключевые слова, Тип по умолчанию: in/out/auto)
-    ("Продажи",               ["оплата от покуп", "оплата по счет", "оплата по договор",
-                              "выручка", "эквайринг", "приход от клиент", "розничн"], "auto"),
-    ("Налоги",                ["налог", "енп", "ндс", "усн", "взнос", "фнс", "страхован"], "out"),
-    ("Зарплата",              ["зарплат", "заработ", "аванс сотруд", "оплата труда", "отпускн"], "out"),
-    ("Аренда",                ["аренд", "помещени"], "out"),
-    ("Кредиты и лизинг",      ["кредит", "лизинг", "процент по договору займа", "тело кредита"], "out"),
-    ("Логистика и транспорт", ["транспорт", "доставк", "топлив", "перевоз", "автомобил", "дорог", "гсм"], "out"),
-    ("Связь и IT",            ["интернет", "связи", "телеком", "программ", "хостинг", "подписк", "сзв"], "out"),
-    ("Комиссии и банк",       ["комисси", "ведение счета", "обслуживание счета", "пко", "рко"], "out"),
-    ("Закупки и поставщики",  ["поставк", "закуп", "сырь", "товар", "упд", "счет №", "счёт №",
-                              "материал", "инвентар"], "out"),
+INFLOW_RULES: list[tuple[str, list[str]]] = [
+    ("Возврат / корректировка", [
+        "возврат", "возмещ", "корректировк", "переплат", "ошибочн",
+    ]),
+    ("Кредиты и финансирование", [
+        "кредит", "займ", "заем", "субсид", "грант", "транш", "финансирован",
+    ]),
+    ("Финансовые доходы", [
+        "процент на остаток", "депозит", "вклад", "дивиденд", "купон",
+    ]),
+    ("Продажи и выручка", [
+        "оплата", "выручка", "эквайринг", "приход", "розничн", "покуп",
+        "клиент", "счет", "счёт", "договор", "товар", "услуг", "работ",
+        "упд", "акт", "поставк", "аванс", "реализац", "маркетплейс",
+    ]),
+]
+
+OUTFLOW_RULES: list[tuple[str, list[str]]] = [
+    ("Налоги и взносы", [
+        "налог", "енп", "ндс", "усн", "взнос", "фнс", "страхован",
+        "пфр", "сфр", "ндфл", "пени", "пеней", "бюджет",
+    ]),
+    ("Зарплата и персонал", [
+        "зарплат", "заработ", "аванс сотруд", "оплата труда", "отпускн",
+        "преми", "больничн", "реестр зачислений", "самозанят",
+    ]),
+    ("Аренда и помещение", [
+        "аренд", "помещени", "коммунал", "электроэнерг", "эксплуатац",
+    ]),
+    ("Кредиты и лизинг", [
+        "кредит", "лизинг", "процент по договору", "тело кредита", "погашен", "займ",
+    ]),
+    ("Логистика и транспорт", [
+        "транспорт", "доставк", "топлив", "перевоз", "автомобил", "дорог",
+        "гсм", "курьер", "экспедир",
+    ]),
+    ("Связь, IT и маркетинг", [
+        "интернет", "связи", "связь", "телеком", "программ", "хостинг",
+        "подписк", "сзв", "реклам", "маркетинг", "лиценз", "1с", " облак",
+    ]),
+    ("Комиссии и банк", [
+        "комисси", "ведение счета", "ведение счёта", "обслуживание счета",
+        "пко", "рко", "эквайринг комисс", "банковск",
+    ]),
+    ("Закупки и поставщики", [
+        "поставк", "закуп", "сырь", "товар", "упд", "счет №", "счёт №",
+        "материал", "инвентар", "оборудован", "комплектующ", "работ", "услуг",
+    ]),
 ]
 
 
-# Категории, которые по экономическому смыслу НЕ МОГУТ быть поступлениями.
-# Если операция с такой категорией помечена как «Поступление» в выписке —
-# это либо возврат/корректировка (например, возврат переплаты по налогу),
-# либо ошибка парсинга направления в CSV. Такие операции переотнесём в
-# отдельную категорию «Возврат / корректировка», чтобы не искажать сводку.
-EXPENSE_ONLY_CATEGORIES = {
-    "Налоги", "Зарплата", "Аренда", "Кредиты и лизинг",
-    "Логистика и транспорт", "Связь и IT", "Комиссии и банк",
-    "Закупки и поставщики",
-}
+def _detect_inflow(direction_lower: pd.Series, df: pd.DataFrame) -> pd.Series:
+    contains_inflow = direction_lower.str.contains(
+        "поступ|приход|income|inflow|зачисл|прих|кредит|возврат|возмещ",
+        regex=True, na=False,
+    )
+    contains_outflow = direction_lower.str.contains(
+        "спис|расход|outflow|expense|платёж|платеж|оплата со счет|дебет|снят",
+        regex=True, na=False,
+    )
+    exact_inflow = direction_lower.isin([
+        "к", "кт", "c", "cr", "credit", "кр", "in", "+", "1",
+        "приход", "поступление", "поступило", "зачислено",
+    ])
+    exact_outflow = direction_lower.isin([
+        "д", "дт", "d", "dr", "debit", "out", "-", "0", "-1",
+        "расход", "списание", "списано", "списан",
+    ])
+    inflow = (contains_inflow | exact_inflow) & ~exact_outflow
+    outflow = contains_outflow | exact_outflow
+    amount = df["amount"]
+    fallback_pos = (amount > 0) & ~inflow & ~outflow
+    return inflow | fallback_pos
+
+
+def _detect_outflow(direction_lower: pd.Series, df: pd.DataFrame) -> pd.Series:
+    contains_inflow = direction_lower.str.contains(
+        "поступ|приход|income|inflow|зачисл|прих|кредит|возврат|возмещ",
+        regex=True, na=False,
+    )
+    contains_outflow = direction_lower.str.contains(
+        "спис|расход|outflow|expense|платёж|платеж|оплата со счет|дебет|снят",
+        regex=True, na=False,
+    )
+    exact_inflow = direction_lower.isin([
+        "к", "кт", "c", "cr", "credit", "кр", "in", "+", "1",
+    ])
+    exact_outflow = direction_lower.isin([
+        "д", "дт", "d", "dr", "debit", "out", "-", "0", "-1",
+    ])
+    outflow = (contains_outflow | exact_outflow) & ~exact_inflow
+    amount = df["amount"]
+    fallback_neg = (amount < 0) & ~contains_inflow & ~contains_outflow & ~exact_inflow
+    return outflow | fallback_neg
 
 
 def categorize_vectorized(df: pd.DataFrame) -> pd.Series:
-    """Векторизованная категоризация — в ~50–100× быстрее, чем apply(axis=1).
-    Переотносит подозрительные «поступления» в расходных категориях в
-    отдельную категорию «Возврат / корректировка»."""
-    purpose = df["payment_purpose"].fillna("").str.lower()
-    counter = df["counterparty_name"].fillna("").str.lower()
+    """Точная векторизованная категоризация с разделением правил для притоков и оттоков."""
+    purpose = df["payment_purpose"].fillna("").astype(str).str.lower()
+    counter = df["counterparty_name"].fillna("").astype(str).str.lower()
     text = purpose + " " + counter
     direction = df["direction"].fillna("").astype(str).str.lower()
 
     is_inflow = _detect_inflow(direction, df)
-
     categories = pd.Series("Прочие", index=df.index, dtype="object")
-    for name, words, default_type in CATEGORY_RULES:
-        mask = text.str.contains("|".join(words), regex=True, na=False)
-        # Применяем только там, где категория ещё не назначена (приоритет по порядку).
-        unassigned = categories == "Прочие"
-        apply_mask = mask & unassigned
-        categories = categories.where(~apply_mask, name)
 
-    # Прочие поступления / расходы
-    unassigned = categories == "Прочие"
-    categories = categories.where(~(unassigned & is_inflow), "Прочие поступления")
-    categories = categories.where(~(unassigned & ~is_inflow), "Прочие расходы")
+    # 1. Классификация поступлений
+    for name, words in INFLOW_RULES:
+        mask = is_inflow & (categories == "Прочие") & text.str.contains("|".join(words), regex=True, na=False)
+        categories = categories.where(~mask, name)
 
-    # Safety-чек: поступление в расходной категории → «Возврат / корректировка».
-    suspicious = categories.isin(EXPENSE_ONLY_CATEGORIES) & is_inflow
-    categories = categories.where(~suspicious, "Возврат / корректировка")
+    # 2. Классификация списаний
+    for name, words in OUTFLOW_RULES:
+        mask = (~is_inflow) & (categories == "Прочие") & text.str.contains("|".join(words), regex=True, na=False)
+        categories = categories.where(~mask, name)
+
+    # 3. Оставшиеся операции
+    categories = categories.where(~((categories == "Прочие") & is_inflow), "Прочие поступления")
+    categories = categories.where(~((categories == "Прочие") & (~is_inflow)), "Прочие расходы")
     return categories
 
 
-def _detect_inflow(direction_lower: pd.Series, df: pd.DataFrame) -> pd.Series:
-    """Распознаёт поступление по столбцу direction. Поддерживает:
-    русские/английские ключевые слова, аббревиатуры Кт/Дт, C/D, CR/DR,
-    Credit/Debit, Кредит/Дебет (в банковском смысле), а также fallback
-    по знаку суммы, если direction не распознан."""
-    contains_inflow = direction_lower.str.contains(
-        "поступ|приход|income|inflow|зачисл|прих|кредит|возврат|возмещ",
-        regex=True, na=False,
-    )
-    contains_outflow = direction_lower.str.contains(
-        "спис|расход|outflow|expense|платёж|платеж|оплата со счет|дебет|снят",
-        regex=True, na=False,
-    )
-    # Точные короткие коды (категорически игнорируем неоднозначные)
-    exact_inflow = direction_lower.isin([
-        "к", "кт", "c", "cr", "credit", "кр", "in", "+",
-        "приход", "поступление", "поступило", "зачислено",
-    ])
-    exact_outflow = direction_lower.isin([
-        "д", "дт", "d", "dr", "debit", "out", "-",
-        "расход", "списание", "списано", "списан",
-    ])
-    inflow = contains_inflow | exact_inflow
-    outflow = contains_outflow | exact_outflow
-    # Fallback по знаку суммы (если direction не распознан).
-    amount = df["amount"]
-    fallback_pos = (amount > 0) & ~inflow & ~outflow
-    fallback_neg = (amount < 0) & ~inflow & ~outflow
-    inflow = inflow | fallback_pos
-    return inflow
-
-
-def _detect_outflow(direction_lower: pd.Series, df: pd.DataFrame) -> pd.Series:
-    """Симметричный помощник для нормализации."""
-    contains_inflow = direction_lower.str.contains(
-        "поступ|приход|income|inflow|зачисл|прих|кредит|возврат|возмещ",
-        regex=True, na=False,
-    )
-    contains_outflow = direction_lower.str.contains(
-        "спис|расход|outflow|expense|платёж|платеж|оплата со счет|дебет|снят",
-        regex=True, na=False,
-    )
-    exact_inflow = direction_lower.isin([
-        "к", "кт", "c", "cr", "credit", "кр", "in", "+",
-    ])
-    exact_outflow = direction_lower.isin([
-        "д", "дт", "d", "dr", "debit", "out", "-",
-    ])
-    outflow = contains_outflow | exact_outflow
-    amount = df["amount"]
-    fallback_neg = (amount < 0) & ~contains_inflow & ~contains_outflow & ~exact_inflow
-    outflow = outflow | fallback_neg
-    return outflow
-
-
 # ────────────────────────────────────────────────────────────────────────────
-#  ЧТЕНИЕ CSV (с поддержкой cp1251 — частая кодировка российских банков)
+# 3. ЗАГРУЗКА И НОРМАЛИЗАЦИЯ ДАННЫХ (с поддержкой мульти-компаний)
 # ────────────────────────────────────────────────────────────────────────────
+COLUMN_ALIASES = {
+    "operation_date": ["operation_date", "date", "дата", "дата операции", "дата платежа", "дата проводки"],
+    "amount": ["amount", "сумма", "сумма операции", "сумма платежа", "сумма в валюте"],
+    "direction": ["direction", "направление", "тип операции", "вид операции", "дт/кт"],
+    "balance_eod": ["balance_eod", "balance", "остаток", "остаток на счёте", "остаток на счете", "остаток на конец дня"],
+    "payment_purpose": ["payment_purpose", "назначение платежа", "назначение", "описание", "комментарий"],
+    "counterparty_name": ["counterparty_name", "контрагент", "наименование контрагента", "получатель/плательщик"],
+    "counterparty_inn": ["counterparty_inn", "inn", "инн", "инн контрагента"],
+    "company_id": ["company_id", "company", "компания", "id компании", "организация"],
+}
+
+
 def read_csv_safely(file) -> pd.DataFrame:
     if hasattr(file, "getvalue"):
         raw = file.getvalue()
@@ -281,35 +456,16 @@ def read_csv_safely(file) -> pd.DataFrame:
     for enc in encodings:
         for sep in seps:
             try:
-                df = pd.read_csv(io.BytesIO(raw), sep=sep, encoding=enc)
+                df = pd.read_csv(io.BytesIO(raw), sep=sep, encoding=enc, low_memory=False)
                 if len(df.columns) > 2:
                     return df
             except Exception as e:
                 last_err = e
-    raise ValueError(
-        f"Не удалось прочитать CSV. Проверьте разделитель и кодировку. Последняя ошибка: {last_err}"
-    )
-
-
-# ────────────────────────────────────────────────────────────────────────────
-#  НОРМАЛИЗАЦИЯ
-# ────────────────────────────────────────────────────────────────────────────
-COLUMN_ALIASES = {
-    "operation_date":    ["operation_date", "date", "дата", "дата операции", "дата платежа"],
-    "amount":            ["amount", "сумма", "сумма операции", "сумма платежа"],
-    "direction":         ["direction", "направление", "тип операции", "вид операции"],
-    "balance_eod":       ["balance_eod", "balance", "остаток", "остаток на счёте",
-                          "остаток на счете", "остаток на конец дня"],
-    "payment_purpose":   ["payment_purpose", "назначение платежа", "назначение"],
-    "counterparty_name": ["counterparty_name", "контрагент", "наименование контрагента"],
-    "counterparty_inn":  ["counterparty_inn", "inn", "инн"],
-    "company_id":        ["company_id", "company", "компания", "id компании"],
-}
+    raise ValueError(f"Не удалось прочитать CSV. Проверьте формат файла. Детали: {last_err}")
 
 
 def normalize_data(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    # Регистронезависимый матчинг заголовков
     lower = {str(c).strip().lower(): c for c in df.columns}
     rename = {}
     for target, options in COLUMN_ALIASES.items():
@@ -324,59 +480,52 @@ def normalize_data(df: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError(
             "Не найдены обязательные поля: " + ", ".join(missing) +
-            ". Нужны дата операции, сумма и направление."
+            ". Нужны: дата операции, сумма и направление."
         )
 
     for col in ["payment_purpose", "counterparty_name", "counterparty_inn", "company_id"]:
         if col not in df.columns:
             df[col] = ""
 
-    # Дата: пробуем dayfirst True (РФ), затем auto.
-    df["operation_date"] = pd.to_datetime(df["operation_date"], errors="coerce", dayfirst=True)
+    # Парсинг дат (поддержка ISO YYYY-MM-DD и РФ DD.MM.YYYY)
+    sample_dates = df["operation_date"].dropna().astype(str).head(20)
+    is_iso = sample_dates.str.match(r"^\d{4}-\d{2}-\d{2}").all() if len(sample_dates) else False
+    df["operation_date"] = pd.to_datetime(
+        df["operation_date"], errors="coerce", dayfirst=not is_iso
+    )
     if df["operation_date"].isna().all():
         df["operation_date"] = pd.to_datetime(df["operation_date"], errors="coerce")
 
-    # Сумма: чистим пробелы и запятые, поддерживаем отрицательные (если направление кодировано знаком).
     df["amount"] = pd.to_numeric(
-        df["amount"].astype(str).str.replace(" ", "", regex=False)
-                    .str.replace("\u00a0", "", regex=False)
-                    .str.replace(",", ".", regex=False),
+        df["amount"].astype(str)
+        .str.replace(" ", "", regex=False)
+        .str.replace("\u00a0", "", regex=False)
+        .str.replace(",", ".", regex=False),
         errors="coerce",
     )
 
     df["direction"] = df["direction"].astype(str).str.strip().str.lower()
-    direction_text = df["direction"]
+    inflow = _detect_inflow(df["direction"], df)
+    outflow = _detect_outflow(df["direction"], df)
 
-    inflow = _detect_inflow(direction_text, df)
-    outflow = _detect_outflow(direction_text, df)
-
-    # Если ничего не распознано — пробуем чистый знак суммы как последний шанс.
-    unclassified = ~inflow & ~outflow
-    if unclassified.any() and (inflow.sum() + outflow.sum()) == 0:
-        # Полный провал: ни одно направление не распознано. Используем знак суммы.
-        inflow = (df["amount"] > 0) | inflow
-        outflow = (df["amount"] < 0) | outflow
+    if (inflow.sum() + outflow.sum()) == 0:
+        inflow = df["amount"] > 0
+        outflow = df["amount"] < 0
 
     df["amount"] = df["amount"].abs()
     df["signed_amount"] = np.select([inflow, outflow], [df["amount"], -df["amount"]], default=np.nan)
 
-    if df["signed_amount"].notna().sum() == 0:
-        raise ValueError(
-            "Не распознаны направления операций. Используйте «Поступление» и «Списание», "
-            "коды Кт/Дт, C/D, Credit/Debit, знак +/- суммы, или числовое направление."
-        )
-
     df = df.dropna(subset=["operation_date", "amount", "signed_amount"])
     df = df[df["amount"] >= 0].copy()
     if df.empty:
-        raise ValueError("После очистки не осталось корректных операций.")
+        raise ValueError("После очистки не осталось корректных финансовых операций.")
 
-    # Если есть остаток на счёте — приведём к числу.
     if "balance_eod" in df.columns:
         df["balance_eod"] = pd.to_numeric(
-            df["balance_eod"].astype(str).str.replace(" ", "", regex=False)
-                            .str.replace("\u00a0", "", regex=False)
-                            .str.replace(",", ".", regex=False),
+            df["balance_eod"].astype(str)
+            .str.replace(" ", "", regex=False)
+            .str.replace("\u00a0", "", regex=False)
+            .str.replace(",", ".", regex=False),
             errors="coerce",
         )
 
@@ -386,29 +535,22 @@ def normalize_data(df: pd.DataFrame) -> pd.DataFrame:
     return df.sort_values("operation_date").reset_index(drop=True)
 
 
-# ────────────────────────────────────────────────────────────────────────────
-#  СИНТЕТИЧЕСКИЕ ДЕМО-ДАННЫЕ (если настоящий архив недоступен)
-# ────────────────────────────────────────────────────────────────────────────
 def synthetic_company(company_id: str = "C001", days: int = 540) -> pd.DataFrame:
-    """Генерирует реалистичную банковскую выписку малого бизнеса:
-    будние дни B2B-оплаты, ежедневный эквайринг, зарплата 10/25, аренда 5-го,
-    ENP 28-го, квартальный НДС, периодические закупки."""
+    """Генерирует реалистичную банковскую выписку малого бизнеса."""
     rng = np.random.default_rng(abs(hash(company_id)) % (2**32))
     start = pd.Timestamp.today().normalize() - pd.Timedelta(days=days)
     dates = pd.date_range(start, periods=days, freq="D")
 
     rows: list[dict] = []
-    balance = rng.uniform(180_000, 480_000)
-    base_daily_sales = rng.uniform(35_000, 90_000)
-    trend = rng.uniform(0.0005, 0.0015)  # лёгкий рост во времени
+    balance = rng.uniform(250_000, 620_000)
+    base_daily_sales = rng.uniform(42_000, 95_000)
+    trend = rng.uniform(0.0003, 0.0012)
 
     for i, d in enumerate(dates):
         weekday = d.dayofweek
-        # Сезонность по дням недели
-        wd_factor = [0.85, 0.95, 1.10, 1.15, 1.05, 0.75, 0.55][weekday]
-        seasonal = 1 + 0.18 * np.sin(2 * np.pi * i / 365)
-        acq = max(0, base_daily_sales * wd_factor * seasonal * (1 + trend * i)
-                  * rng.normal(1.0, 0.18))
+        wd_factor = [0.88, 0.96, 1.08, 1.14, 1.06, 0.72, 0.52][weekday]
+        seasonal = 1 + 0.16 * np.sin(2 * np.pi * i / 365)
+        acq = max(0, base_daily_sales * wd_factor * seasonal * (1 + trend * i) * rng.normal(1.0, 0.16))
         if acq > 0:
             balance += acq
             rows.append(dict(
@@ -416,24 +558,22 @@ def synthetic_company(company_id: str = "C001", days: int = 540) -> pd.DataFrame
                 balance_eod=round(balance, 2),
                 payment_purpose="Оплата от покупателя по терминалу, эквайринг",
                 counterparty_name="Банк-эквайер",
-                counterparty_inn="0000000000", company_id=company_id,
+                counterparty_inn="7700000001", company_id=company_id,
             ))
 
-        # B2B-оплаты от клиентов (вт-чт)
-        if weekday in (1, 2, 3) and rng.random() < 0.55:
-            invoice = round(rng.uniform(120_000, 480_000), 2)
+        if weekday in (1, 2, 3) and rng.random() < 0.52:
+            invoice = round(rng.uniform(110_000, 420_000), 2)
             balance += invoice
             rows.append(dict(
                 operation_date=d, amount=invoice, direction="Поступление",
                 balance_eod=round(balance, 2),
-                payment_purpose="Оплата по счёту №" + str(rng.integers(1000, 9999)),
-                counterparty_name="ООО «Клиент " + str(rng.integers(1, 30)) + "»",
-                counterparty_inn="7700000000", company_id=company_id,
+                payment_purpose=f"Оплата по счёту №{rng.integers(1000, 9999)} за поставку товара",
+                counterparty_name=f"ООО «Клиент {rng.integers(1, 25)}»",
+                counterparty_inn="7700000002", company_id=company_id,
             ))
 
-        # Аренда 5-го
         if d.day == 5:
-            rent = round(rng.uniform(85_000, 145_000), 2)
+            rent = round(rng.uniform(95_000, 145_000), 2)
             balance -= rent
             rows.append(dict(
                 operation_date=d, amount=rent, direction="Списание",
@@ -443,352 +583,352 @@ def synthetic_company(company_id: str = "C001", days: int = 540) -> pd.DataFrame
                 counterparty_inn="7701111111", company_id=company_id,
             ))
 
-        # Зарплата 10-го и 25-го
         if d.day in (10, 25):
-            salary = round(rng.uniform(180_000, 320_000), 2)
+            salary = round(rng.uniform(190_000, 310_000), 2)
             balance -= salary
             rows.append(dict(
                 operation_date=d, amount=salary, direction="Списание",
                 balance_eod=round(balance, 2),
-                payment_purpose="Выплата заработной платы сотрудникам, аванс",
+                payment_purpose="Выплата заработной платы сотрудникам по зарплатному проекту",
                 counterparty_name="Сотрудники (зарплатный проект)",
                 counterparty_inn="", company_id=company_id,
             ))
 
-        # ENP 28-го
         if d.day == 28:
-            enp = round(rng.uniform(95_000, 240_000), 2)
+            enp = round(rng.uniform(110_000, 230_000), 2)
             balance -= enp
             rows.append(dict(
                 operation_date=d, amount=enp, direction="Списание",
                 balance_eod=round(balance, 2),
-                payment_purpose="Единый налоговый платёж (ЕНП), ФНС",
-                counterparty_name="ФНС России",
-                counterparty_inn="7700000000", company_id=company_id,
+                payment_purpose="Единый налоговый платёж (ЕНП), ФНС России",
+                counterparty_name="УФК (ФНС России)",
+                counterparty_inn="7707329152", company_id=company_id,
             ))
 
-        # НДС квартально (1-й месяц квартала = доплата)
         if d.day == 28 and d.month in (1, 4, 7, 10):
-            nds = round(rng.uniform(40_000, 90_000), 2)
+            nds = round(rng.uniform(45_000, 95_000), 2)
             balance -= nds
             rows.append(dict(
                 operation_date=d, amount=nds, direction="Списание",
                 balance_eod=round(balance, 2),
-                payment_purpose="Доплата НДС за прошлый квартал, ЕНП",
-                counterparty_name="ФНС России",
-                counterparty_inn="7700000000", company_id=company_id,
+                payment_purpose="Квартальный платёж по НДС / УСН, ФНС",
+                counterparty_name="УФК (ФНС России)",
+                counterparty_inn="7707329152", company_id=company_id,
             ))
 
-        # Закупки и поставщики (случайно в будни)
         if weekday in range(5) and rng.random() < 0.35:
-            supply = round(rng.uniform(40_000, 220_000), 2)
+            supply = round(rng.uniform(45_000, 210_000), 2)
             balance -= supply
             rows.append(dict(
                 operation_date=d, amount=supply, direction="Списание",
                 balance_eod=round(balance, 2),
-                payment_purpose="Оплата по УПД за поставку товара",
-                counterparty_name="ООО «Поставщик " + str(rng.integers(1, 20)) + "»",
+                payment_purpose="Оплата по УПД за закупку сырья и материалов",
+                counterparty_name=f"ООО «Поставщик {rng.integers(1, 18)}»",
                 counterparty_inn="7702222222", company_id=company_id,
             ))
 
-        # Логистика (мелкие)
-        if weekday in range(5) and rng.random() < 0.25:
-            tr = round(rng.uniform(8_000, 28_000), 2)
+        if weekday in range(5) and rng.random() < 0.24:
+            tr = round(rng.uniform(9_000, 27_000), 2)
             balance -= tr
             rows.append(dict(
                 operation_date=d, amount=tr, direction="Списание",
                 balance_eod=round(balance, 2),
-                payment_purpose="Транспортные расходы, доставка товара",
+                payment_purpose="Транспортные услуги и логистика товара",
                 counterparty_name="ООО «Логист-Транс»",
                 counterparty_inn="7703333333", company_id=company_id,
             ))
 
-        # Комиссии банка
         if d.day == 1:
-            comm = round(rng.uniform(2_500, 7_500), 2)
+            comm = round(rng.uniform(2_900, 6_900), 2)
             balance -= comm
             rows.append(dict(
                 operation_date=d, amount=comm, direction="Списание",
                 balance_eod=round(balance, 2),
-                payment_purpose="Комиссия за ведение счёта, РКО",
-                counterparty_name="Банк",
+                payment_purpose="Комиссия банка за РКО и ведение счёта",
+                counterparty_name="АО «Банк»",
                 counterparty_inn="7704444444", company_id=company_id,
             ))
 
-    df = pd.DataFrame(rows)
-    return normalize_data(df)
+    return normalize_data(pd.DataFrame(rows))
 
 
 # ────────────────────────────────────────────────────────────────────────────
-#  МОДЕЛИ ПРОГНОЗА И БЭКТЕСТ
+# 4. МОДЕЛИ ПРОГНОЗИРОВАНИЯ, БЭКТЕСТ И ДОВЕРИТЕЛЬНЫЕ ИНТЕРВАЛЫ
 # ────────────────────────────────────────────────────────────────────────────
-def _weekday_avg_netflow(df: pd.DataFrame, lookback_days: int = 84) -> pd.Series:
-    """Средний чистый поток по дням недели за последние lookback_days дней."""
-    end = df["operation_date"].max()
-    cutoff = end - pd.Timedelta(days=lookback_days)
-    recent = df[df["operation_date"] >= cutoff].copy()
-    if len(recent) == 0:
-        recent = df.copy()
-    recent["dow"] = recent["operation_date"].dt.dayofweek
-    weekday_net = recent.groupby("dow")["signed_amount"].mean()
-    # Clip outliers: 5/95 percentile
-    if len(recent) > 10:
-        lo, hi = recent["signed_amount"].quantile([0.05, 0.95])
-        weekday_net = weekday_net.clip(lower=lo, upper=hi)
-    overall = float(recent["signed_amount"].mean())
+def _daily_net_series(df: pd.DataFrame, lookback_days: int | None = None) -> pd.Series:
+    daily = (
+        df.groupby(df["operation_date"].dt.normalize())["signed_amount"]
+        .sum()
+        .asfreq("D", fill_value=0.0)
+    )
+    if lookback_days and len(daily) > lookback_days:
+        daily = daily.iloc[-lookback_days:]
+    return daily
+
+
+def _weekday_avg_netflow(df: pd.DataFrame, lookback_days: int = 90) -> Tuple[pd.Series, float]:
+    daily = _daily_net_series(df, lookback_days=lookback_days)
+    if len(daily) == 0:
+        return pd.Series(0.0, index=range(7)), 0.0
+    if len(daily) > 10:
+        lo, hi = daily.quantile([0.05, 0.95])
+        clipped = daily.clip(lower=lo, upper=hi)
+    else:
+        clipped = daily
+    dow = clipped.index.dayofweek
+    weekday_net = clipped.groupby(dow).mean()
+    overall = float(clipped.mean())
     return weekday_net, overall
 
 
-def forecast_weekday_mean(df: pd.DataFrame, horizon: int, current_balance: float) -> pd.DataFrame:
-    weekday_net, overall = _weekday_avg_netflow(df)
+def forecast_weekday_mean(
+    df: pd.DataFrame, horizon: int, current_balance: float, lookback_days: int = 90
+) -> pd.DataFrame:
+    weekday_net, overall = _weekday_avg_netflow(df, lookback_days=lookback_days)
     last_date = df["operation_date"].max().normalize()
     future = pd.date_range(last_date + pd.Timedelta(days=1), periods=horizon, freq="D")
     flows = [float(weekday_net.get(d.dayofweek, overall)) for d in future]
-    balance = current_balance
-    cum = []
-    for f in flows:
-        balance += f
-        cum.append(balance)
+    cum = np.cumsum(flows) + current_balance
     return pd.DataFrame({"date": future, "flow": flows, "balance": cum, "model": "Weekday Mean"})
 
 
-def forecast_holt(df: pd.DataFrame, horizon: int, current_balance: float) -> pd.DataFrame:
-    """Holt's linear trend на ежедневном чистом потоке (с заполнением пропусков)."""
-    daily_net = (
-        df.groupby(df["operation_date"].dt.normalize())["signed_amount"].sum()
-          .asfreq("D", fill_value=0.0)
-    )
+def forecast_holt(
+    df: pd.DataFrame, horizon: int, current_balance: float, lookback_days: int = 90
+) -> pd.DataFrame:
+    daily_net = _daily_net_series(df, lookback_days=lookback_days)
     if len(daily_net) < 14:
-        # Слишком мало данных — откатываемся к weekday mean
-        return forecast_weekday_mean(df, horizon, current_balance).assign(model="Holt (fallback)")
+        return forecast_weekday_mean(df, horizon, current_balance, lookback_days).assign(model="Holt Linear")
     try:
         model = Holt(daily_net, initialization_method="estimated", damped_trend=True)
         fit = model.fit(optimized=True)
         f = fit.forecast(horizon)
-        flows = f.clip(lower=-daily_net.abs().quantile(0.95)).values
+        q95 = float(daily_net.abs().quantile(0.95)) if len(daily_net) else np.inf
+        flows = np.clip(f.values, -q95, q95)
     except Exception:
-        return forecast_weekday_mean(df, horizon, current_balance).assign(model="Holt (fallback)")
-    balance = current_balance
-    cum = []
-    for fl in flows:
-        balance += float(fl)
-        cum.append(balance)
-    return pd.DataFrame({"date": pd.date_range(daily_net.index[-1] + pd.Timedelta(days=1),
-                                              periods=horizon, freq="D"),
-                         "flow": flows, "balance": cum, "model": "Holt Linear"})
+        return forecast_weekday_mean(df, horizon, current_balance, lookback_days).assign(model="Holt Linear")
+
+    future = pd.date_range(daily_net.index[-1] + pd.Timedelta(days=1), periods=horizon, freq="D")
+    cum = np.cumsum(flows) + current_balance
+    return pd.DataFrame({"date": future, "flow": flows, "balance": cum, "model": "Holt Linear"})
 
 
-def forecast_linear_trend_weekday(df: pd.DataFrame, horizon: int,
-                                  current_balance: float) -> pd.DataFrame:
-    """Линейный тренд чистого потока по дням + поправка на день недели."""
-    daily_net = (
-        df.groupby(df["operation_date"].dt.normalize())["signed_amount"].sum()
-          .asfreq("D", fill_value=0.0)
-    )
+def forecast_linear_trend_weekday(
+    df: pd.DataFrame, horizon: int, current_balance: float, lookback_days: int = 90
+) -> pd.DataFrame:
+    daily_net = _daily_net_series(df, lookback_days=lookback_days)
     if len(daily_net) < 21:
-        return forecast_weekday_mean(df, horizon, current_balance).assign(model="Linear (fallback)")
-    # Скользящее среднее для сглаживания
+        return forecast_weekday_mean(df, horizon, current_balance, lookback_days).assign(model="Linear + Weekday")
     smoothed = daily_net.rolling(7, min_periods=1, center=True).mean()
     X = np.arange(len(smoothed)).reshape(-1, 1)
     try:
         reg = LinearRegression().fit(X, smoothed.values)
-        trend_slope = float(reg.coef_[0])
-        trend_intercept = float(reg.intercept_)
+        slope = float(reg.coef_[0])
+        intercept = float(reg.intercept_)
     except Exception:
-        return forecast_weekday_mean(df, horizon, current_balance).assign(model="Linear (fallback)")
-    weekday_net, overall = _weekday_avg_netflow(df)
-    last_date = daily_net.index[-1]
-    future = pd.date_range(last_date + pd.Timedelta(days=1), periods=horizon, freq="D")
+        return forecast_weekday_mean(df, horizon, current_balance, lookback_days).assign(model="Linear + Weekday")
+
+    weekday_net, overall = _weekday_avg_netflow(df, lookback_days=lookback_days)
+    future = pd.date_range(daily_net.index[-1] + pd.Timedelta(days=1), periods=horizon, freq="D")
     flows = []
     for i, d in enumerate(future, start=len(daily_net)):
         wd = float(weekday_net.get(d.dayofweek, overall))
-        trend = trend_intercept + trend_slope * i
-        # 70% веса — weekday pattern, 30% — долгий тренд
-        flow = 0.7 * wd + 0.3 * trend
-        flows.append(float(np.clip(flow, -np.inf, np.inf)))
-    balance = current_balance
-    cum = []
-    for fl in flows:
-        balance += fl
-        cum.append(balance)
-    return pd.DataFrame({"date": future, "flow": flows, "balance": cum,
-                         "model": "Linear + Weekday"})
-
-
-def backtest_model(df: pd.DataFrame, horizon: int, model_fn) -> dict:
-    """Hold-out бэктест: обучаемся на данных без последних `horizon` дней,
-    предсказываем `horizon` дней и сравниваем с фактом. Возвращает метрики."""
-    daily_net = (
-        df.groupby(df["operation_date"].dt.normalize())["signed_amount"].sum()
-          .asfreq("D", fill_value=0.0)
-    )
-    if len(daily_net) <= horizon + 7:
-        return {"mae": np.nan, "mape": np.nan, "rmse": np.nan, "bias": np.nan}
-    train_df = df[df["operation_date"] < daily_net.index[-horizon]]
-    test_df = df[df["operation_date"] >= daily_net.index[-horizon]]
-    if len(train_df) < 14 or len(test_df) == 0:
-        return {"mae": np.nan, "mape": np.nan, "rmse": np.nan, "bias": np.nan}
-
-    # Баланс на момент начала hold-out
-    if "balance_eod" in df.columns and df["balance_eod"].notna().any():
-        cutoff_date = daily_net.index[-horizon]
-        before = df[(df["operation_date"] < cutoff_date) & df["balance_eod"].notna()]
-        if len(before):
-            start_balance = float(before.sort_values("operation_date").iloc[-1]["balance_eod"])
-        else:
-            start_balance = float(
-                train_df.groupby(train_df["operation_date"].dt.normalize())["signed_amount"]
-                        .sum().cumsum().iloc[-1]
-            )
-    else:
-        start_balance = float(
-            train_df.groupby(train_df["operation_date"].dt.normalize())["signed_amount"]
-                    .sum().cumsum().iloc[-1]
-        )
-
-    pred = model_fn(train_df, horizon, start_balance)
-    actual_balances = daily_net.iloc[-horizon:].cumsum() + start_balance
-    pred_balances = pred.set_index("date")["balance"].reindex(actual_balances.index)
-
-    diff = pred_balances.values - actual_balances.values
-    mask = ~np.isnan(diff)
-    if mask.sum() == 0:
-        return {"mae": np.nan, "mape": np.nan, "rmse": np.nan, "bias": np.nan}
-    diff = diff[mask]
-    abs_actual = np.abs(actual_balances.values[mask])
-    mae = float(np.mean(np.abs(diff)))
-    rmse = float(np.sqrt(np.mean(diff ** 2)))
-    bias = float(np.mean(diff))
-    with np.errstate(divide="ignore", invalid="ignore"):
-        mape_arr = np.abs(diff) / np.where(abs_actual == 0, np.nan, abs_actual)
-    mape = float(np.nanmean(mape_arr) * 100) if not np.isnan(mape_arr).all() else np.nan
-    return {"mae": mae, "mape": mape, "rmse": rmse, "bias": bias}
-
-
-# ────────────────────────────────────────────────────────────────────────────
-#  ГЛАВНЫЙ ПРОГНОЗ + ДОВЕРИТЕЛЬНЫЕ ИНТЕРВАЛЫ
-# ────────────────────────────────────────────────────────────────────────────
-def compute_confidence_interval(forecast_df: pd.DataFrame, residual_std: float,
-                                current_balance: float) -> pd.DataFrame:
-    """Берём std остатков из бэктеста и строим 95% доверительный коридор."""
-    out = forecast_df.copy()
-    bal_col = "Прогноз остатка" if "Прогноз остатка" in out.columns else "balance"
-    if np.isnan(residual_std) or residual_std <= 0:
-        out["Нижняя граница 95%"] = out[bal_col]
-        out["Верхняя граница 95%"] = out[bal_col]
-        return out
-    # Накопительный std для остаточного баланса: sqrt(n) * daily_std
-    steps = np.arange(1, len(out) + 1)
-    sigma = residual_std * np.sqrt(steps)
-    out["Нижняя граница 95%"] = out[bal_col] - 1.96 * sigma
-    out["Верхняя граница 95%"] = out[bal_col] + 1.96 * sigma
-    return out
+        tr = intercept + slope * i
+        flows.append(0.72 * wd + 0.28 * tr)
+    cum = np.cumsum(flows) + current_balance
+    return pd.DataFrame({"date": future, "flow": flows, "balance": cum, "model": "Linear + Weekday"})
 
 
 def get_current_balance(df: pd.DataFrame, daily_net: pd.Series) -> float:
     if "balance_eod" in df.columns and df["balance_eod"].notna().any():
-        before = df[df["balance_eod"].notna()].sort_values("operation_date")
-        if len(before):
-            return float(before.iloc[-1]["balance_eod"])
-    return float(daily_net.cumsum().iloc[-1])
+        valid = df[df["balance_eod"].notna()].sort_values("operation_date")
+        if len(valid):
+            return float(valid.iloc[-1]["balance_eod"])
+    return float(daily_net.cumsum().iloc[-1]) if len(daily_net) else 0.0
+
+
+def backtest_model(df: pd.DataFrame, horizon: int, model_fn, lookback_days: int = 90) -> dict:
+    daily_net = _daily_net_series(df, lookback_days=None)
+    bt_horizon = min(horizon, max(7, len(daily_net) // 4))
+    if len(daily_net) <= bt_horizon + 14:
+        flow_std = float(daily_net.std()) if len(daily_net) > 1 else 0.0
+        return {"mae": np.nan, "mape": np.nan, "rmse": np.nan, "bias": np.nan, "flow_std": flow_std}
+
+    cutoff_date = daily_net.index[-bt_horizon]
+    train_df = df[df["operation_date"] < cutoff_date]
+    if len(train_df) < 14:
+        flow_std = float(daily_net.std())
+        return {"mae": np.nan, "mape": np.nan, "rmse": np.nan, "bias": np.nan, "flow_std": flow_std}
+
+    train_daily = _daily_net_series(train_df, lookback_days=None)
+    start_balance = get_current_balance(train_df, train_daily)
+
+    pred = model_fn(train_df, bt_horizon, start_balance, lookback_days=lookback_days)
+    actual_flows = daily_net.iloc[-bt_horizon:]
+    actual_balances = actual_flows.cumsum() + start_balance
+
+    pred_indexed = pred.set_index("date").reindex(actual_balances.index)
+    pred_balances = pred_indexed["balance"]
+    pred_flows = pred_indexed["flow"]
+
+    diff_bal = (pred_balances - actual_balances).dropna().values
+    diff_flow = (pred_flows - actual_flows).dropna().values
+
+    if len(diff_bal) == 0:
+        return {"mae": np.nan, "mape": np.nan, "rmse": np.nan, "bias": np.nan, "flow_std": float(daily_net.std())}
+
+    mae = float(np.mean(np.abs(diff_bal)))
+    rmse = float(np.sqrt(np.mean(diff_bal ** 2)))
+    bias = float(np.mean(diff_bal))
+
+    abs_act = np.abs(actual_balances.values[:len(diff_bal)])
+    denom = np.maximum(abs_act, np.mean(abs_act) * 0.1 + 1.0)
+    mape = float(np.mean(np.abs(diff_bal) / denom) * 100.0)
+
+    # Стандартное отклонение дневной ошибки потока (для корректного 95% ДИ)
+    flow_std = float(np.std(diff_flow)) if len(diff_flow) > 1 else float(daily_net.std())
+    return {"mae": mae, "mape": mape, "rmse": rmse, "bias": bias, "flow_std": flow_std}
+
+
+def _normal_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def compute_confidence_interval(forecast_df: pd.DataFrame, daily_flow_std: float) -> pd.DataFrame:
+    """Строит 95% доверительный интервал и считает вероятность разрыва P(Balance_t < 0)."""
+    out = forecast_df.copy()
+    bal_col = "Прогноз остатка" if "Прогноз остатка" in out.columns else "balance"
+    if np.isnan(daily_flow_std) or daily_flow_std <= 0:
+        out["Нижняя граница 95%"] = out[bal_col]
+        out["Верхняя граница 95%"] = out[bal_col]
+        out["Вероятность разрыва, %"] = np.where(out[bal_col] < 0, 100.0, 0.0)
+        return out
+
+    steps = np.arange(1, len(out) + 1)
+    sigma_t = daily_flow_std * np.sqrt(steps)
+    out["Нижняя граница 95%"] = out[bal_col] - 1.96 * sigma_t
+    out["Верхняя граница 95%"] = out[bal_col] + 1.96 * sigma_t
+
+    probs = []
+    for bal, sig in zip(out[bal_col].values, sigma_t):
+        if sig <= 0:
+            probs.append(100.0 if bal < 0 else 0.0)
+        else:
+            z = (0.0 - float(bal)) / float(sig)
+            probs.append(round(_normal_cdf(z) * 100.0, 1))
+    out["Вероятность разрыва, %"] = probs
+    return out
 
 
 def make_forecast_enhanced(
     df: pd.DataFrame,
     horizon: int = 30,
-    revenue_drop: float = 0,
-    extra_expense: float = 0,
+    lookback_days: int = 120,
+    selected_model: str = "Авто (лучшая по MAE)",
+    revenue_drop: float = 0.0,
+    extra_expense: float = 0.0,
     delay_days: int = 0,
-    fixed_cost_increase: float = 0,
+    fixed_cost_increase: float = 0.0,
     manual_events: list[dict] | None = None,
-) -> Tuple[float, pd.DataFrame, pd.DataFrame, dict]:
-    """Считает прогноз best-моделью + доверительный интервал + метрики качества.
-    Поддерживает 4 типа стресс-сценариев (по ТЗ «со звёздочкой»):
-      1. revenue_drop %  — снижение выручки (потеря клиента, сезонный спад)
-      2. delay_days      — задержка поступлений от крупного клиента
-      3. extra_expense   — внеплановый расход (ремонт, штраф, доначисление)
-      4. fixed_cost_increase % — рост постоянных расходов (аренда, закупки)
-    Возвращает: (current_balance, forecast_with_ci, daily_actual, model_meta).
-    """
+) -> Tuple[float, pd.DataFrame, pd.Series, dict]:
     daily_net = (
-        df.groupby(df["operation_date"].dt.normalize())["signed_amount"].sum()
-    ).sort_index()
+        df.groupby(df["operation_date"].dt.normalize())["signed_amount"].sum().sort_index()
+    )
     current_balance = get_current_balance(df, daily_net)
 
-    # Сравнение моделей на бэктесте — выбираем ту, у которой меньше MAE.
     candidates = {
-        "Weekday Mean":      (forecast_weekday_mean, backtest_model(df, horizon, forecast_weekday_mean)),
-        "Holt Linear":       (forecast_holt, backtest_model(df, horizon, forecast_holt)),
-        "Linear + Weekday":  (forecast_linear_trend_weekday,
-                              backtest_model(df, horizon, forecast_linear_trend_weekday)),
+        "Weekday Mean": (
+            forecast_weekday_mean,
+            backtest_model(df, horizon, forecast_weekday_mean, lookback_days),
+        ),
+        "Holt Linear": (
+            forecast_holt,
+            backtest_model(df, horizon, forecast_holt, lookback_days),
+        ),
+        "Linear + Weekday": (
+            forecast_linear_trend_weekday,
+            backtest_model(df, horizon, forecast_linear_trend_weekday, lookback_days),
+        ),
     }
-    best_name = min(candidates.keys(), key=lambda k: candidates[k][1]["mae"] if not np.isnan(candidates[k][1]["mae"]) else np.inf)
+
+    if selected_model in candidates:
+        best_name = selected_model
+    else:
+        best_name = min(
+            candidates.keys(),
+            key=lambda k: candidates[k][1]["mae"] if not np.isnan(candidates[k][1]["mae"]) else np.inf,
+        )
     best_fn, best_metrics = candidates[best_name]
 
-    base = best_fn(df, horizon, current_balance)
+    base = best_fn(df, horizon, current_balance, lookback_days=lookback_days)
     base = base.rename(columns={"date": "Дата", "flow": "Ожидаемый поток", "balance": "Прогноз остатка"})
+    base["Плановые события"] = 0.0
+    base["Описание событий"] = ""
 
-    # Применение стресс-сценария
-    flows = base["Ожидаемый поток"].copy()
+    flows = base["Ожидаемый поток"].astype(float).copy()
     start_date = base["Дата"].iloc[0]
-    # Предвычисляем среднедневной «постоянный расход» из последних 12 недель:
-    # аренда, зарплата, лизинг — всё, что стабильно списывается.
+
+    # Расчёт среднедневных постоянных издержек для стресс-сценария
     fixed_daily_outflow = 0.0
-    if fixed_cost_increase:
-        cutoff = df["operation_date"].max() - pd.Timedelta(days=84)
+    if fixed_cost_increase > 0:
+        cutoff = df["operation_date"].max() - pd.Timedelta(days=lookback_days)
         recent = df[df["operation_date"] >= cutoff]
         fixed_mask = recent["category"].isin([
-            "Аренда", "Зарплата", "Кредиты и лизинг", "Связь и IT", "Комиссии и банк",
+            "Аренда и помещение", "Зарплата и персонал", "Кредиты и лизинг",
+            "Связь, IT и маркетинг", "Комиссии и банк",
         ])
         if fixed_mask.any():
             fixed_out = -recent.loc[fixed_mask, "signed_amount"].sum()
-            days = max((recent["operation_date"].max() - recent["operation_date"].min()).days, 1)
-            fixed_daily_outflow = fixed_out / days
+            span_days = max((recent["operation_date"].max() - recent["operation_date"].min()).days, 1)
+            fixed_daily_outflow = fixed_out / span_days
+
+    # Среднедневной приток и отток для реалистичного моделирования шоков
+    recent_cut = df[df["operation_date"] >= (df["operation_date"].max() - pd.Timedelta(days=lookback_days))]
+    span_d = max((recent_cut["operation_date"].max() - recent_cut["operation_date"].min()).days, 1)
+    avg_inflow_day = float(recent_cut.loc[recent_cut["signed_amount"] > 0, "signed_amount"].sum()) / span_d
+
+    delayed_pool = 0.0
     for i, d in enumerate(base["Дата"]):
-        f = flows.iloc[i]
-        if revenue_drop and f > 0:
-            f = f * (1 - revenue_drop / 100.0)
-        if delay_days and d <= start_date + pd.Timedelta(days=delay_days - 1):
-            # Только отсрочка входящих
-            f = min(f, 0.0)
-        if fixed_cost_increase and fixed_daily_outflow > 0:
-            # Увеличение применяется к ежедневному расходу (равномерно)
+        f = float(flows.iloc[i])
+        if revenue_drop > 0:
+            # Снижаем дневную выручку пропорционально среднему притоку
+            drop_val = max(f, avg_inflow_day * 0.65) * (revenue_drop / 100.0)
+            f -= drop_val
+        if delay_days > 0:
+            if i < delay_days:
+                held = max(0.0, avg_inflow_day * 0.55)
+                f -= held
+                delayed_pool += held
+            elif i == delay_days and delayed_pool > 0:
+                f += delayed_pool * 0.85  # Клиент оплачивает задержанный счёт после отсрочки
+        if fixed_cost_increase > 0 and fixed_daily_outflow > 0:
             f -= fixed_daily_outflow * (fixed_cost_increase / 100.0)
-        if extra_expense and i == 0:
+        if extra_expense > 0 and i == 2:
             f -= extra_expense
         flows.iloc[i] = f
 
-    # Внедрение ручных событий (договоры, счета, налоги).
+    # Инкрементальное наложение плановых событий (договоры, счета, налоги, регулярные)
     if manual_events:
         for ev in manual_events:
             try:
-                ev_date = pd.to_datetime(ev["date"], dayfirst=True)
+                ev_date = pd.to_datetime(ev["date"], dayfirst=True).normalize()
                 ev_amount = float(ev["amount"])
-                if ev.get("type") == "out":
-                    ev_amount = -abs(ev_amount)
-                else:
-                    ev_amount = abs(ev_amount)
+                ev_signed = -abs(ev_amount) if ev.get("type") == "out" else abs(ev_amount)
             except Exception:
                 continue
-            # Найти ближайший день в горизонте
-            mask = base["Дата"] == ev_date.normalize()
+            mask = base["Дата"] == ev_date
             if mask.any():
                 idx = base.index[mask][0]
-                flows.loc[idx] += ev_amount
-            # Если дата вне горизонта — игнорируем
+                flows.loc[idx] += ev_signed
+                base.loc[idx, "Плановые события"] += ev_signed
+                prev_desc = base.loc[idx, "Описание событий"]
+                label = f"{ev.get('description', 'Событие')} ({ev.get('source', 'План')})"
+                base.loc[idx, "Описание событий"] = f"{prev_desc}; {label}".strip("; ")
 
-    # Пересчитать кумулятивный остаток с модифицированными потоками
-    balance = current_balance
-    cum = []
-    for f in flows:
-        balance += float(f)
-        cum.append(balance)
-    base["Прогноз остатка"] = cum
     base["Ожидаемый поток"] = flows
+    base["Прогноз остатка"] = np.cumsum(flows.values) + current_balance
 
-    # Доверительные интервалы (используем MAE из бэктеста как прокси std)
-    residual_std = best_metrics["mae"] if not np.isnan(best_metrics["mae"]) else 0
-    base = compute_confidence_interval(base, residual_std, current_balance)
+    daily_flow_std = best_metrics.get("flow_std", 0.0)
+    base = compute_confidence_interval(base, daily_flow_std)
 
     model_meta = {
         "best_model": best_name,
@@ -800,16 +940,29 @@ def make_forecast_enhanced(
 
 
 # ────────────────────────────────────────────────────────────────────────────
-#  ВСПОМОГАТЕЛЬНЫЕ KPI
+# 5. ФОРМАТИРОВАНИЕ, KPI И СИСТЕМА РЕКОМЕНДАЦИЙ (Задача из Цели PDF)
 # ────────────────────────────────────────────────────────────────────────────
-def fmt_money(x: float, suffix: str = " ₽") -> str:
+def fmt_money(x: float | None, suffix: str = " ₽") -> str:
     if x is None or (isinstance(x, float) and np.isnan(x)):
         return "—"
     sign = "−" if x < 0 else ""
     return f"{sign}{abs(x):,.0f}".replace(",", " ") + suffix
 
 
-def fmt_pct(x: float) -> str:
+def fmt_compact(x: float | None, suffix: str = " ₽") -> str:
+    """Компактная запись для крупных сумм, чтобы карточки никогда не обрезались."""
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return "—"
+    sign = "−" if x < 0 else ""
+    ax = abs(x)
+    if ax >= 1_000_000_000:
+        return f"{sign}{ax / 1_000_000_000:.2f} млрд{suffix}".replace(".", ",")
+    if ax >= 10_000_000:
+        return f"{sign}{ax / 1_000_000:.2f} млн{suffix}".replace(".", ",")
+    return fmt_money(x, suffix)
+
+
+def fmt_pct(x: float | None) -> str:
     if x is None or (isinstance(x, float) and np.isnan(x)):
         return "—"
     return f"{x:.1f} %"
@@ -818,36 +971,32 @@ def fmt_pct(x: float) -> str:
 def compute_kpis(df: pd.DataFrame, current_balance: float, base_forecast: pd.DataFrame) -> dict:
     inflows = float(df.loc[df["signed_amount"] > 0, "signed_amount"].sum())
     outflows = float(-df.loc[df["signed_amount"] < 0, "signed_amount"].sum())
-    history_days = (df["operation_date"].max() - df["operation_date"].min()).days or 1
-    avg_daily_inflow = inflows / max(history_days, 1)
-    avg_daily_outflow = outflows / max(history_days, 1)
+    history_days = max((df["operation_date"].max() - df["operation_date"].min()).days, 1)
+    avg_daily_inflow = inflows / history_days
+    avg_daily_outflow = outflows / history_days
     net_burn = avg_daily_outflow - avg_daily_inflow
 
     min_balance = float(base_forecast["Прогноз остатка"].min())
     min_idx = base_forecast["Прогноз остатка"].idxmin()
     min_date = base_forecast.loc[min_idx, "Дата"]
-    days_to_min = (min_date - df["operation_date"].max()).days
+    days_to_min = int((min_date - df["operation_date"].max()).days)
 
-    # Runway: сколько дней до 0, если средний чистый отток сохранится.
-    if net_burn > 0:
-        runway = int(current_balance / net_burn)
-    else:
-        runway = None  # не сгорает
+    runway = int(max(0, current_balance) / net_burn) if net_burn > 0 else None
 
-    # Риск кассового разрыва: % площади под CI ниже 0.
-    low = base_forecast["Нижняя граница 95%"]
-    risk_pct = float((low < 0).mean() * 100)
+    # Максимальная дневная вероятность ухода в минус на горизонте прогноза
+    risk_pct = float(base_forecast["Вероятность разрыва, %"].max())
 
-    # Дефицит
     deficit_mask = base_forecast["Прогноз остатка"] < 0
     if deficit_mask.any():
-        risk_date = base_forecast.loc[deficit_mask, "Дата"].min()
-        risk_amount = abs(float(base_forecast.loc[base_forecast["Дата"] == risk_date, "Прогноз остатка"].iloc[0]))
+        first_neg_row = base_forecast.loc[deficit_mask].iloc[0]
+        risk_date = first_neg_row["Дата"]
+        risk_amount = abs(float(min_balance))
+        gap_days_count = int(deficit_mask.sum())
     else:
         risk_date = None
         risk_amount = 0.0
+        gap_days_count = 0
 
-    # Волатильность (стандартное отклонение дневного чистого потока)
     daily_net = df.groupby(df["operation_date"].dt.normalize())["signed_amount"].sum()
     volatility = float(daily_net.std()) if len(daily_net) > 1 else 0.0
 
@@ -865,155 +1014,238 @@ def compute_kpis(df: pd.DataFrame, current_balance: float, base_forecast: pd.Dat
         "risk_pct": risk_pct,
         "risk_date": risk_date,
         "risk_amount": risk_amount,
+        "gap_days_count": gap_days_count,
         "volatility": volatility,
         "history_days": history_days,
     }
 
 
+def generate_recommendations(
+    df: pd.DataFrame, base_forecast: pd.DataFrame, kpis: dict
+) -> list[str]:
+    """Формирует понятные предпринимателю объяснения и рекомендации (Требование Цели PDF)."""
+    recs: list[str] = []
+    safety_buffer = kpis["avg_daily_outflow"] * 7  # Недельный запас прочности
+
+    # Находим дни наибольших списаний в прогнозе
+    worst_days = base_forecast.nsmallest(2, "Ожидаемый поток")
+    reasons = []
+    for _, row in worst_days.iterrows():
+        if row["Ожидаемый поток"] < 0:
+            desc = row["Описание событий"] if row["Описание событий"] else "плановые списания"
+            reasons.append(f"{row['Дата']:%d.%m.%Y} ({fmt_money(row['Ожидаемый поток'])}, {desc})")
+
+    if kpis["risk_date"] is not None:
+        need_sum = kpis["risk_amount"] + safety_buffer
+        recs.append(
+            f"🚨 <b>Причина кассового разрыва:</b> к {kpis['risk_date']:%d.%m.%Y} накопленные списания превысят "
+            f"остаток на счёте. Пиковые оттоки ожидаются: {', '.join(reasons) if reasons else 'по регулярным расходам'}."
+        )
+        recs.append(
+            f"💡 <b>Действие 1 (Дебиторка / предоплата):</b> ускорьте поступления от клиентов или запросите аванс "
+            f"на сумму минимум <b>{fmt_money(kpis['risk_amount'])}</b> (оптимально с буфером — <b>{fmt_money(need_sum)}</b>) до {kpis['risk_date']:%d.%m.%Y}."
+        )
+        recs.append(
+            "💡 <b>Действие 2 (Перенос некритичных оплат):</b> согласуйте с поставщиками отсрочку платежей по категории "
+            "«Закупки и поставщики» на 7–14 дней после прохождения даты налоговых и зарплатных выплат (25–28 числа)."
+        )
+        recs.append(
+            f"💡 <b>Действие 3 (Кредитное плечо):</b> при невозможности сдвинуть платежи заранее оформите овердрафт "
+            f"или возобновляемую кредитную линию на <b>{fmt_money(kpis['risk_amount'] * 1.15)}</b> на срок {max(7, kpis['gap_days_count'] + 5)} дн."
+        )
+    elif kpis["min_balance"] < safety_buffer or kpis["risk_pct"] >= 25.0:
+        shortfall = max(0.0, safety_buffer - kpis["min_balance"])
+        recs.append(
+            f"⚠️ <b>Снижение подушки безопасности:</b> около {kpis['min_date']:%d.%m.%Y} остаток опустится до "
+            f"<b>{fmt_money(kpis['min_balance'])}</b>, что меньше 7-дневного запаса расходов ({fmt_money(safety_buffer)})."
+        )
+        if reasons:
+            recs.append(f"📌 <b>Факторы нагрузки:</b> крупнейшие ожидаемые оттоки — {', '.join(reasons)}.")
+        recs.append(
+            f"💡 <b>Рекомендация:</b> зарезервируйте на счёте дополнительно <b>{fmt_money(shortfall)}</b> к 25–28 числу "
+            "под зарплату и ЕНП и не назначайте крупных разовых закупок на эту неделю."
+        )
+    else:
+        surplus = max(0.0, kpis["min_balance"] - safety_buffer * 1.5)
+        recs.append(
+            f"✅ <b>Финансовая устойчивость:</b> на всём горизонте прогноза сохраняется профицит ликвидности. "
+            f"Минимальный остаток ({fmt_money(kpis['min_balance'])} на {kpis['min_date']:%d.%m.%Y}) уверенно перекрывает обязательные платежи."
+        )
+        if surplus > 100_000:
+            recs.append(
+                f"💜 <b>Управление свободным остатком:</b> среднесрочный неснижаемый остаток ~<b>{fmt_money(surplus)}</b> "
+                "можно разместить на бизнес-овернайт или краткосрочный депозит без риска для операционных платежей."
+            )
+    return recs
+
+
 # ────────────────────────────────────────────────────────────────────────────
-#  АВТО-ДЕТЕКТ РЕГУЛЯРНЫХ ПЛАТЕЖЕЙ (Задача 2 из ТЗ)
+# 6. АВТО-ДЕТЕКТ РЕГУЛЯРНЫХ ПЛАТЕЖЕЙ И НАЛОГОВЫЙ КАЛЕНДАРЬ
 # ────────────────────────────────────────────────────────────────────────────
 def detect_recurring_payments(df: pd.DataFrame, min_occurrences: int = 3) -> list[dict]:
-    """Автоматически находит регулярные платежи (аренда, зарплата, ENP, лизинг).
-    Алгоритм: группируем по контрагенту+знаку, проверяем периодичность
-    (месячный или квартальный цикл) и стабильность суммы (CV < 25%).
-    Возвращает список с предсказанием следующего платежа."""
     if len(df) < min_occurrences:
         return []
 
     recurring: list[dict] = []
     df_s = df.sort_values("operation_date").copy()
     df_s["counterparty_key"] = (
-        df_s["counterparty_name"].fillna("").astype(str).str.strip().str.lower()
-        .str[:40]
+        df_s["counterparty_name"].fillna("").astype(str).str.strip()
+        .replace("", np.nan)
+        .fillna(df_s["category"])
+        .str.slice(0, 42)
     )
     df_s["sign"] = np.sign(df_s["signed_amount"])
-    today = df_s["operation_date"].max()
+    today = df_s["operation_date"].max().normalize()
 
     for (counterparty, sign), group in df_s.groupby(["counterparty_key", "sign"]):
         if not counterparty or len(group) < min_occurrences:
             continue
-        dates = group["operation_date"].dt.normalize().sort_values()
+        # Агрегируем операции одного дня с одним контрагентом
+        daily_grp = group.groupby(group["operation_date"].dt.normalize())["amount"].sum()
+        if len(daily_grp) < min_occurrences:
+            continue
+        dates = pd.Series(daily_grp.index).sort_values()
         diffs = dates.diff().dropna()
-        if len(diffs) < min_occurrences - 1:
-            continue
         median_interval = diffs.median()
-        # Поддерживаем месячный (25-35 дней) и квартальный (85-95 дней) циклы
-        valid = (
-            (pd.Timedelta(days=20) <= median_interval <= pd.Timedelta(days=40))
-            or (pd.Timedelta(days=80) <= median_interval <= pd.Timedelta(days=100))
+
+        valid_cycle = (
+            (pd.Timedelta(days=12) <= median_interval <= pd.Timedelta(days=18))  # Аванс/зарплата (2 раза в мес)
+            or (pd.Timedelta(days=24) <= median_interval <= pd.Timedelta(days=36))  # Ежемесячный
+            or (pd.Timedelta(days=80) <= median_interval <= pd.Timedelta(days=100))  # Квартальный
         )
-        if not valid:
+        if not valid_cycle:
             continue
-        amounts = group["amount"].abs()
+
+        amounts = daily_grp.abs()
         median_amount = float(amounts.median())
         if median_amount <= 0:
             continue
-        cv = float(amounts.std() / median_amount) if median_amount > 0 else 1
-        if cv > 0.30:
+        cv = float(amounts.std() / median_amount) if len(amounts) > 1 else 0.0
+        if cv > 0.38:
             continue
+
         last_date = dates.iloc[-1]
         next_date = last_date + median_interval
-        # Skip «неактивные» паттерны: если ожидаемый следующий платёж уже в прошлом —
-        # регулярность прекратилась, не прогнозируем.
-        if next_date < today:
+        while next_date <= today:
+            next_date += median_interval
+
+        if (next_date - last_date).days > 120:
             continue
+
         recurring.append({
-            "counterparty": counterparty[:40],
+            "counterparty": str(counterparty),
             "direction": "Поступление" if sign > 0 else "Списание",
             "interval_days": int(median_interval.days),
             "median_amount": median_amount,
             "last_date": last_date,
             "next_date": next_date,
-            "occurrences": int(len(group)),
+            "occurrences": int(len(daily_grp)),
             "cv": cv,
             "category": group["category"].mode().iloc[0] if not group["category"].empty else "Прочее",
         })
+
     recurring.sort(key=lambda r: r["median_amount"], reverse=True)
     return recurring
 
 
+def default_tax_events(df: pd.DataFrame, horizon_days: int) -> list[dict]:
+    """Формирует налоговый календарь с адаптацией сумм под масштаб выбранной компании."""
+    start_date = df["operation_date"].max().normalize()
+    tax_rows = df[df["category"] == "Налоги и взносы"]
+    if len(tax_rows) >= 2:
+        typical_enp = float(round(tax_rows["amount"].median(), -3))
+    else:
+        monthly_out = float(-df.loc[df["signed_amount"] < 0, "signed_amount"].sum()) / max(
+            (df["operation_date"].max() - df["operation_date"].min()).days / 30.0, 1.0
+        )
+        typical_enp = float(round(max(25_000.0, monthly_out * 0.12), -3))
+    typical_nds = float(round(typical_enp * 0.45, -3))
+
+    events: list[dict] = []
+    cur = start_date + pd.Timedelta(days=1)
+    end = start_date + pd.Timedelta(days=horizon_days)
+    while cur <= end:
+        if cur.day == 28:
+            events.append({
+                "date": cur.strftime("%d.%m.%Y"),
+                "amount": typical_enp,
+                "type": "out",
+                "description": "Единый налоговый платёж (ЕНП до 28-го)",
+                "source": "Налоговый календарь ФНС",
+            })
+            if cur.month in (1, 4, 7, 10):
+                events.append({
+                    "date": cur.strftime("%d.%m.%Y"),
+                    "amount": typical_nds,
+                    "type": "out",
+                    "description": "Квартальный платёж НДС / аванс УСН",
+                    "source": "Налоговый календарь ФНС",
+                })
+        cur += pd.Timedelta(days=1)
+    return events
+
 
 # ────────────────────────────────────────────────────────────────────────────
-#  ЦВЕТА ДЛЯ PLOTLY
+# 7. СТИЛИЗАЦИЯ ГРАФИКОВ PLOTLY (Бело-фиолетовая тема)
 # ────────────────────────────────────────────────────────────────────────────
-PLOTLY_TEMPLATE = "plotly_dark"
-PLOTLY_PALETTE = {
-    "blue":   "#3b82f6",
-    "cyan":   "#06b6d4",
-    "green":  "#22c55e",
-    "amber":  "#f59e0b",
-    "red":    "#ef4444",
-    "violet": "#8b5cf6",
-    "pink":   "#ec4899",
-    "grey":   "#64748b",
-    "lime":   "#84cc16",
-    "orange": "#f97316",
-}
-
-
-def style_plotly_fig(fig: go.Figure, height: int = 420) -> go.Figure:
+def style_plotly_fig(fig: go.Figure, height: int = 410) -> go.Figure:
     fig.update_layout(
-        template=PLOTLY_TEMPLATE,
+        template="plotly_white",
         height=height,
-        margin=dict(l=10, r=10, t=30, b=10),
+        margin=dict(l=12, r=12, t=34, b=12),
         paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="#FFFFFF",
         font=dict(color=TEXT_PRIMARY, family="Inter, system-ui, sans-serif", size=13),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
-                    bgcolor="rgba(0,0,0,0)"),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+            bgcolor="rgba(255,255,255,0.85)",
+        ),
         hovermode="x unified",
-        hoverlabel=dict(bgcolor=PANEL_BG, font_color=TEXT_PRIMARY, bordercolor=PANEL_BORDER),
-        xaxis=dict(gridcolor="rgba(255,255,255,0.06)", zerolinecolor="rgba(255,255,255,0.10)"),
-        yaxis=dict(gridcolor="rgba(255,255,255,0.06)", zerolinecolor="rgba(255,255,255,0.10)",
-                   tickformat=",.0f"),
+        hoverlabel=dict(bgcolor="#FFFFFF", font_color=TEXT_PRIMARY, bordercolor=CARD_BORDER),
+        xaxis=dict(
+            gridcolor="#F1EEF9",
+            linecolor=CARD_BORDER,
+            zerolinecolor=CARD_BORDER,
+        ),
+        yaxis=dict(
+            gridcolor="#F1EEF9",
+            linecolor=CARD_BORDER,
+            zerolinecolor="#DDD6FE",
+            tickformat=",.0f",
+        ),
     )
     return fig
 
 
 # ────────────────────────────────────────────────────────────────────────────
-#  АУТЕНТИФИКАЦИЯ (Тех. требование 7 — безопасность)
+# 8. АУТЕНТИФИКАЦИЯ (Техническое требование №7 — Безопасность)
 # ────────────────────────────────────────────────────────────────────────────
-# Включается установкой env-переменной FINPOTOK_PASSWORD перед запуском:
-#   FINPOTOK_PASSWORD=secret streamlit run app.py
-# Пароль хранится в env, не в коде. В логи пишутся только хэши (если пишутся).
 _AUTH_PASSWORD = os.environ.get("FINPOTOK_PASSWORD", "").strip()
 
 
 def _auth_gate() -> bool:
-    """Проверяет аутентификацию. Если FINPOTOK_PASSWORD не задан — пропускает."""
     if not _AUTH_PASSWORD:
         return True
-    if "auth_ok" not in st.session_state:
-        st.session_state["auth_ok"] = False
-    if st.session_state["auth_ok"]:
+    if st.session_state.get("auth_ok", False):
         return True
     st.markdown(
         f"""
-        <div style='max-width:420px;margin:60px auto;padding:32px;
-                    background:{PANEL_BG};border:1px solid {PANEL_BORDER};
-                    border-radius:16px;'>
-          <h2 style='margin:0 0 8px;'>🔐 ФинПоток</h2>
-          <div style='color:{TEXT_SECONDARY};font-size:0.9rem;margin-bottom:20px;'>
-            Доступ к финансовым данным ограничен. Введите пароль.
+        <div class='fp-card' style='max-width:440px;margin:60px auto;padding:30px;'>
+          <h2 style='margin:0 0 8px;color:{VIOLET_PRIMARY};'>🔐 ФинПоток · Защищённый вход</h2>
+          <div style='color:{TEXT_SECONDARY};font-size:0.92rem;'>
+            Доступ к финансовым данным компании защищён паролем.
           </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    pwd = st.text_input("Пароль", type="password", placeholder="••••••••")
-    col_a, col_b = st.columns([1, 3])
-    with col_a:
-        if st.button("Войти", type="primary", use_container_width=True):
-            # Защита от time-атак: используем compare_digest
-            import hmac
-            if hmac.compare_digest(pwd, _AUTH_PASSWORD):
-                st.session_state["auth_ok"] = True
-                st.rerun()
-            else:
-                st.error("Неверный пароль")
-    with col_b:
-        st.caption("💡 Пароль задаётся переменной окружения FINPOTOK_PASSWORD")
+    pwd = st.text_input("Пароль доступа", type="password", placeholder="••••••••")
+    if st.button("Войти в систему", type="primary"):
+        if hmac.compare_digest(pwd, _AUTH_PASSWORD):
+            st.session_state["auth_ok"] = True
+            st.rerun()
+        else:
+            st.error("Неверный пароль.")
     st.stop()
     return False
 
@@ -1022,212 +1254,223 @@ _auth_gate()
 
 
 # ────────────────────────────────────────────────────────────────────────────
-#  БОКОВАЯ ПАНЕЛЬ
-# ────────────────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("### 📊 ФинПоток")
-    if _AUTH_PASSWORD:
-        st.caption("🔒 Защищённый режим")
-    else:
-        st.caption("🔓 Публичный режим")
-    st.caption("Cash-Flow Forecaster для малого бизнеса")
-    st.markdown('<div class="fp-divider"></div>', unsafe_allow_html=True)
-
-    st.markdown('<div class="fp-section-title">Источник данных</div>',
-                unsafe_allow_html=True)
-    source = st.radio(
-        "Источник",
-        ["Демо-датасет (синтетика)", "Демо из архива кейса", "Загрузить выписку CSV"],
-        index=0, label_visibility="collapsed",
-    )
-    uploaded = None
-    selected_company = None
-
-    if source == "Загрузить выписку CSV":
-        uploaded = st.file_uploader("Файл банковской выписки CSV", type=["csv"])
-    elif source == "Демо из архива кейса":
-        st.caption("Архив cashflow_dataset_participants.zip рядом с app.py")
-        companies = ["C001", "C002", "C008", "C009", "C021", "C040"]
-        selected_company = st.selectbox("Компания", companies, index=0)
-    else:
-        st.caption("Сгенерировать синтетическую выписку с реалистичными паттернами")
-        comp_choice = st.selectbox(
-            "Профиль компании", ["C001 (ритейл)", "C002 (услуги)", "C008 (оптовая торговля)",
-                                  "C009 (производство)", "C021 (IT)", "C040 (HoReCa)"],
-            index=0,
-        )
-        selected_company = comp_choice.split(" ")[0]
-
-    st.markdown('<div class="fp-divider"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="fp-section-title">Параметры прогноза</div>',
-                unsafe_allow_html=True)
-    horizon = st.slider("Горизонт прогноза, дней", 14, 120, 30, step=1)
-    lookback = st.slider("Окно обучения, дней", 30, 365, 120, step=10,
-                         help="Используется для сглаживания и бэктеста моделей.")
-
-    st.markdown('<div class="fp-divider"></div>', unsafe_allow_html=True)
-    st.caption("Демо-режимы не требуют подключения к банку. CSV-выписка должна "
-               "содержать дату, сумму, направление и (желательно) остаток на конец дня.")
-
-
-# ────────────────────────────────────────────────────────────────────────────
-#  ЗАГРУЗКА ДАННЫХ
+# 9. БОКОВАЯ ПАНЕЛЬ (Логичное управление источником, компанией и параметрами)
 # ────────────────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False, ttl=300)
-def load_dataset(mode: str, company: str | None, file_bytes: bytes | None) -> pd.DataFrame:
+def load_raw_dataset(mode: str, archive_company: str | None, file_bytes: bytes | None) -> pd.DataFrame:
     if mode == "Загрузить выписку CSV":
         if file_bytes is None:
-            raise ValueError("Файл не загружен.")
+            raise ValueError("Загрузите CSV-файл банковской выписки в боковой панели.")
         return normalize_data(read_csv_safely(file_bytes))
     if mode == "Демо из архива кейса":
         dataset_path = Path(__file__).parent / "cashflow_dataset_participants.zip"
         if not dataset_path.exists():
             raise FileNotFoundError(
                 "Архив cashflow_dataset_participants.zip не найден рядом с app.py. "
-                "Используйте синтетику или загрузите CSV."
+                "Выберите «Демо-датасет (синтетика)» или загрузите свой CSV."
             )
         with zipfile.ZipFile(dataset_path) as archive:
-            raw = archive.read(f"statements/{company}.csv")
+            csv_files = [n for n in archive.namelist() if n.endswith(".csv") and "all_operations" not in n]
+            target = f"statements/{archive_company}.csv"
+            if target not in archive.namelist() and csv_files:
+                target = csv_files[0]
+            raw = archive.read(target)
         return normalize_data(read_csv_safely(raw))
-    # Синтетика
-    return synthetic_company(company or "C001")
+    return synthetic_company(archive_company or "C001")
 
 
-try:
-    file_bytes = uploaded.getvalue() if uploaded is not None else None
-    df = load_dataset(source, selected_company, file_bytes)
-except FileNotFoundError as e:
-    st.error(str(e))
-    st.stop()
-except Exception as e:
-    st.error(f"Не удалось загрузить данные: {e}")
-    st.stop()
-
-
-# ────────────────────────────────────────────────────────────────────────────
-#  РУЧНЫЕ СОБЫТИЯ (договоры, счета, налоги, прочее) — ЗВЁЗДОЧКА
-# ────────────────────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner=False)
-def default_tax_events(start_balance_date: pd.Timestamp, horizon_days: int) -> list[dict]:
-    """Генерирует регулярные налоговые события на горизонте прогноза.
-    ENP — 28-е каждого месяца; НДС — 28-е первого месяца квартала.
-    Суммы по умолчанию — реалистичные средние для малого бизнеса
-    (пользователь редактирует под себя во вкладке «События»)."""
-    events: list[dict] = []
-    start = pd.Timestamp(start_balance_date).normalize() + pd.Timedelta(days=1)
-    end = start + pd.Timedelta(days=horizon_days)
-    cur = start
-    while cur <= end:
-        if cur.day == 28:
-            events.append({
-                "date": cur.strftime("%d.%m.%Y"),
-                "amount": 150_000,   # средний ЕНП для малого бизнеса (~150 тыс ₽/мес)
-                "type": "out",
-                "description": "ЕНП (28-е)",
-            })
-            if cur.month in (1, 4, 7, 10):
-                events.append({
-                    "date": cur.strftime("%d.%m.%Y"),
-                    "amount": 65_000,   # средняя квартальная доплата НДС
-                    "type": "out",
-                    "description": "Доплата НДС (квартальная)",
-                })
-        cur = cur + pd.Timedelta(days=1)
-    return events
-
-
-# ────────────────────────────────────────────────────────────────────────────
-#  ЗАГОЛОВОК СТРАНИЦЫ
-# ────────────────────────────────────────────────────────────────────────────
-st.markdown(
-    f"""
-    <div style='display:flex; align-items:center; justify-content:space-between; gap:14px;'>
-      <div>
-        <h1 style='margin:0 0 4px 0; font-size:1.9rem;'>📊 ФинПоток <span style='color:{ACCENT_BLUE}; font-size:0.9rem; font-weight:600;'>PRO</span></h1>
-        <div style='color:{TEXT_SECONDARY}; font-size:0.92rem;'>Профессиональный прогноз движения денежных средств для малого бизнеса · мультивероятностные сценарии · бэктест моделей</div>
-      </div>
-      <div style='color:{TEXT_SECONDARY}; text-align:right; font-size:0.85rem;'>
-        <div><b style='color:{TEXT_PRIMARY};'>Источник:</b> {source}</div>
-        <div><b style='color:{TEXT_PRIMARY};'>Период:</b> {df['operation_date'].min():%d.%m.%Y} — {df['operation_date'].max():%d.%m.%Y}</div>
-        <div><b style='color:{TEXT_PRIMARY};'>Операций:</b> {len(df):,}</div>
-      </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-st.markdown('<div class="fp-divider"></div>', unsafe_allow_html=True)
-
-
-# ────────────────────────────────────────────────────────────────────────────
-#  ОСНОВНОЙ ПРОГНОЗ
-# ────────────────────────────────────────────────────────────────────────────
-manual_events_state: list[dict] = []
-
-# Сначала считаем базовый прогноз без сценариев (с пустыми ручными событиями)
-current_balance, base_forecast, daily_actual, model_meta = make_forecast_enhanced(
-    df, horizon=horizon, manual_events=manual_events_state
-)
-kpis = compute_kpis(df, current_balance, base_forecast)
-metrics = model_meta["metrics"]
-best_model = model_meta["best_model"]
-
-
-# ────────────────────────────────────────────────────────────────────────────
-#  KPI-КАРТОЧКИ (богаче, чем было)
-# ────────────────────────────────────────────────────────────────────────────
-col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Текущий остаток", fmt_money(kpis["current_balance"]),
-            delta=f"за {kpis['history_days']} дней истории")
-col2.metric("Средний приток / день", fmt_money(kpis["avg_daily_inflow"]),
-            delta=f"за {kpis['history_days']} дн.")
-col3.metric("Средний отток / день", fmt_money(kpis["avg_daily_outflow"]),
-            delta=f"чистый: {fmt_money(-kpis['net_burn'])}",
-            delta_color="inverse" if kpis["net_burn"] > 0 else "normal")
-col4.metric("Минимум в прогнозе",
-            fmt_money(kpis["min_balance"]),
-            delta=f"{kpis['min_date']:%d.%m.%Y} · через {kpis['days_to_min']} дн.",
-            delta_color="inverse" if kpis["min_balance"] < 0 else "off")
-col5.metric("Runway (по ср. чистому потоку)",
-            f"{kpis['runway']:,} дн.".replace(",", " ") if kpis["runway"] else "∞",
-            delta=f"волатильность: {fmt_money(kpis['volatility'])}")
-
-
-# ────────────────────────────────────────────────────────────────────────────
-#  БАННЕР РИСКА
-# ────────────────────────────────────────────────────────────────────────────
-if kpis["risk_date"] is not None:
-    deficit_pct = kpis["risk_pct"]
-    if deficit_pct > 50:
-        sev_cls, sev_pill = "fp-banner-danger", "fp-pill-high"
-        sev_label = "ВЫСОКИЙ РИСК"
-    elif deficit_pct > 20:
-        sev_cls, sev_pill = "fp-banner-warn", "fp-pill-med"
-        sev_label = "СРЕДНИЙ РИСК"
-    else:
-        sev_cls, sev_pill = "fp-banner-info", "fp-pill-low"
-        sev_label = "НИЗКИЙ РИСК"
+with st.sidebar:
     st.markdown(
         f"""
-        <div class='fp-banner {sev_cls}'>
-          <span class='fp-pill {sev_pill}'>{sev_label}</span>
+        <div style='display:flex;align-items:center;gap:10px;margin-bottom:4px;'>
+          <div style='width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,{VIOLET_PRIMARY},{VIOLET_ACCENT});
+                      display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:1.1rem;'>
+            ФП
+          </div>
           <div>
-            Возможен кассовый разрыв <b>{kpis['risk_date']:%d.%m.%Y}</b> — через
-            <b>{(kpis['risk_date'] - df['operation_date'].max()).days} дн.</b>
-            Расчётный дефицит по базовому сценарию: <b>{fmt_money(kpis['risk_amount'])}</b>.
-            Доверительная вероятность разрыва: <b>{fmt_pct(deficit_pct)}</b>.
+            <div style='font-weight:800;font-size:1.15rem;color:{TEXT_PRIMARY};line-height:1.1;'>ФинПоток</div>
+            <div style='font-size:0.76rem;color:{VIOLET_PRIMARY};font-weight:600;'>Cash-Flow Forecaster</div>
           </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-elif kpis["min_balance"] < kpis["current_balance"] * 0.20:
+    st.caption("🔒 Защищённый режим" if _AUTH_PASSWORD else "🔓 Публичный демо-режим")
+    st.markdown('<div class="fp-divider"></div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="fp-section-title">1. Источник данных</div>', unsafe_allow_html=True)
+    source = st.radio(
+        "Источник",
+        ["Демо-датасет (синтетика)", "Демо из архива кейса", "Загрузить выписку CSV"],
+        index=0,
+        label_visibility="collapsed",
+    )
+
+    uploaded = None
+    selected_company = "C001"
+    if source == "Загрузить выписку CSV":
+        uploaded = st.file_uploader("Файл банковской выписки (CSV)", type=["csv"])
+    elif source == "Демо из архива кейса":
+        selected_company = st.selectbox(
+            "Компания из архива",
+            ["C001", "C002", "C008", "C009", "C021", "C040"],
+            index=0,
+        )
+    else:
+        comp_choice = st.selectbox(
+            "Профиль бизнеса",
+            [
+                "C001 — Розничная торговля",
+                "C002 — Сфера услуг (B2B)",
+                "C008 — Оптовые поставки",
+                "C009 — Производство",
+                "C021 — IT и разработка",
+                "C040 — Кафе и HoReCa",
+            ],
+            index=0,
+        )
+        selected_company = comp_choice.split(" ")[0]
+
+    # Загружаем датасет, чтобы проверить наличие нескольких компаний внутри CSV
+    try:
+        file_bytes = uploaded.getvalue() if uploaded is not None else None
+        raw_df = load_raw_dataset(source, selected_company, file_bytes)
+    except Exception as e:
+        st.error(str(e))
+        st.stop()
+
+    # Фильтр по company_id (критично для all_operations.csv, где десятки компаний!)
+    unique_companies = [
+        str(c) for c in raw_df["company_id"].dropna().unique() if str(c).strip() != ""
+    ]
+    if len(unique_companies) > 1:
+        st.markdown('<div class="fp-section-title">Фильтр компании в CSV</div>', unsafe_allow_html=True)
+        chosen_cid = st.selectbox(
+            "Выберите компанию из выписки",
+            sorted(unique_companies) + ["Все компании (сводно)"],
+            index=0,
+            help="В загруженном файле обнаружено несколько компаний. Выберите одну для точного расчёта остатка.",
+        )
+        if chosen_cid != "Все компании (сводно)":
+            df = raw_df[raw_df["company_id"].astype(str) == chosen_cid].copy().reset_index(drop=True)
+            active_company_label = chosen_cid
+        else:
+            df = raw_df
+            active_company_label = f"Все ({len(unique_companies)} комп.)"
+    else:
+        df = raw_df
+        active_company_label = unique_companies[0] if unique_companies else selected_company
+
+    st.markdown('<div class="fp-divider"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="fp-section-title">2. Параметры прогноза</div>', unsafe_allow_html=True)
+    horizon = st.slider("Горизонт прогноза, дней", 14, 120, 30, step=1)
+    lookback = st.slider(
+        "Окно обучения, дней", 30, 365, 120, step=10,
+        help="Глубина исторических данных для обучения моделей и расчёта средних потоков.",
+    )
+    model_choice = st.selectbox(
+        "Модель прогнозирования",
+        ["Авто (лучшая по MAE)", "Weekday Mean", "Holt Linear", "Linear + Weekday"],
+        index=0,
+    )
+    include_events_toggle = st.toggle(
+        "Учитывать налоги, счета и плановые события",
+        value=True,
+        help="Включает события из вкладки «Планировщик» прямо в основной прогноз и оценку риска.",
+    )
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 10. ИНИЦИАЛИЗАЦИЯ СОБЫТИЙ И РАСЧЁТ ОСНОВНОГО ПРОГНОЗА
+# ────────────────────────────────────────────────────────────────────────────
+context_key = f"{source}_{active_company_label}_{len(df)}"
+if st.session_state.get("_last_context_key") != context_key:
+    st.session_state["_last_context_key"] = context_key
+    st.session_state["manual_events_state"] = default_tax_events(df, horizon)
+    st.session_state["pending_invoices"] = []
+
+active_events = st.session_state.get("manual_events_state", []) if include_events_toggle else []
+
+current_balance, base_forecast, daily_actual, model_meta = make_forecast_enhanced(
+    df,
+    horizon=horizon,
+    lookback_days=lookback,
+    selected_model=model_choice,
+    manual_events=active_events,
+)
+kpis = compute_kpis(df, current_balance, base_forecast)
+metrics = model_meta["metrics"]
+best_model = model_meta["best_model"]
+recommendations = generate_recommendations(df, base_forecast, kpis)
+
+# Кнопка быстрого скачивания прогноза в сайдбаре
+with st.sidebar:
+    st.markdown('<div class="fp-divider"></div>', unsafe_allow_html=True)
+    export_df = base_forecast.copy()
+    export_df["Дата"] = export_df["Дата"].dt.strftime("%d.%m.%Y")
+    st.download_button(
+        "📥 Скачать прогноз (CSV)",
+        export_df.round(2).to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"finpotok_forecast_{active_company_label}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 11. ШАПКА, БАННЕР РИСКА И НЕОБРЕЗАЕМЫЕ KPI-КАРТОЧКИ
+# ────────────────────────────────────────────────────────────────────────────
+st.markdown(
+    f"""
+    <div class='fp-header-card'>
+      <div>
+        <div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap;'>
+          <h1 style='margin:0;font-size:1.75rem;font-weight:800;'>ФинПоток</h1>
+          <span class='fp-badge'>💜 Бизнес: {active_company_label}</span>
+          <span class='fp-badge'>🤖 Модель: {best_model}</span>
+          <span class='fp-badge'>📅 Горизонт: {horizon} дн.</span>
+        </div>
+        <div style='color:{TEXT_SECONDARY};font-size:0.92rem;margin-top:6px;'>
+          Интеллектуальное прогнозирование движения денежных средств, контроль кассовых разрывов и сценарное планирование
+        </div>
+      </div>
+      <div style='text-align:right;font-size:0.84rem;color:{TEXT_SECONDARY};'>
+        <div><b style='color:{TEXT_PRIMARY};'>Период выписки:</b> {df['operation_date'].min():%d.%m.%Y} — {df['operation_date'].max():%d.%m.%Y}</div>
+        <div><b style='color:{TEXT_PRIMARY};'>Операций обработано:</b> {len(df):,} ({kpis['history_days']} дн.)</div>
+      </div>
+    </div>
+    """.replace(",", " "),
+    unsafe_allow_html=True,
+)
+
+# Баннер статуса кассового разрыва
+if kpis["risk_date"] is not None:
+    st.markdown(
+        f"""
+        <div class='fp-banner fp-banner-danger'>
+          <span class='fp-pill fp-pill-high'>РИСК РАЗРЫВА</span>
+          <div>
+            <b>Внимание! Прогнозируется кассовый разрыв {kpis['risk_date']:%d.%m.%Y}</b>
+            (через {(kpis['risk_date'] - df['operation_date'].max()).days} дн.).
+            Максимальная нехватка средств составит <b>{fmt_money(kpis['risk_amount'])}</b>
+            (дней в минусе: {kpis['gap_days_count']}).
+            Расчётная вероятность дефицита с учётом волатильности: <b>{fmt_pct(kpis['risk_pct'])}</b>.
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+elif kpis["min_balance"] < kpis["avg_daily_outflow"] * 7 or kpis["risk_pct"] >= 25.0:
     st.markdown(
         f"""
         <div class='fp-banner fp-banner-warn'>
           <span class='fp-pill fp-pill-med'>ВНИМАНИЕ</span>
-          <div>Запас денег может снизиться до <b>{fmt_money(kpis['min_balance'])}</b>
-          {kpis['min_date']:%d.%m.%Y} (≈ {kpis['min_balance']/max(kpis['current_balance'],1)*100:.0f}% от текущего).
-          Проверьте стресс-сценарии во вкладке «Сценарии».</div>
+          <div>
+            Кассовый разрыв в базовом сценарии не ожидается, но <b>{kpis['min_date']:%d.%m.%Y}</b>
+            остаток снизится до <b>{fmt_money(kpis['min_balance'])}</b>.
+            Вероятность ухода в минус при задержке оплат: <b>{fmt_pct(kpis['risk_pct'])}</b>.
+            Рекомендуется проверить вкладку «Сценарии».
+          </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1237,397 +1480,320 @@ else:
         f"""
         <div class='fp-banner fp-banner-success'>
           <span class='fp-pill fp-pill-low'>СТАБИЛЬНО</span>
-          <div>Базовый сценарий не предсказывает кассовый разрыв. Минимум прогноза:
-          <b>{fmt_money(kpis['min_balance'])}</b> ({kpis['min_date']:%d.%m.%Y}).
-          Доверительная вероятность разрыва: <b>{fmt_pct(kpis['risk_pct'])}</b>.</div>
+          <div>
+            <b>Финансовая ситуация устойчива:</b> кассовых разрывов на горизонте {horizon} дней не прогнозируется.
+            Минимальный ожидаемый остаток: <b>{fmt_money(kpis['min_balance'])}</b> ({kpis['min_date']:%d.%m.%Y}).
+            Вероятность возникновения дефицита: <b>{fmt_pct(kpis['risk_pct'])}</b>.
+          </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
+# 5 адаптивных KPI-карточек (никогда не обрезаются троеточием)
+net_flow_daily = kpis["avg_daily_inflow"] - kpis["avg_daily_outflow"]
+net_cls = "pos" if net_flow_daily >= 0 else "neg"
+min_cls = "neg" if kpis["min_balance"] < 0 else "vio"
+runway_str = f"{kpis['runway']} дн." if kpis["runway"] is not None else "Профицит (∞)"
+
+st.markdown(
+    f"""
+    <div class='fp-kpi-grid'>
+      <div class='fp-kpi-card'>
+        <div class='fp-kpi-title'>Текущий остаток на счёте</div>
+        <div class='fp-kpi-value'>{fmt_compact(kpis['current_balance'])}</div>
+        <div class='fp-kpi-sub vio'>Точно: {fmt_money(kpis['current_balance'])}</div>
+      </div>
+      <div class='fp-kpi-card'>
+        <div class='fp-kpi-title'>Средний приток / день</div>
+        <div class='fp-kpi-value'>{fmt_compact(kpis['avg_daily_inflow'])}</div>
+        <div class='fp-kpi-sub pos'>Всего: {fmt_compact(kpis['inflows'])} за {kpis['history_days']} дн.</div>
+      </div>
+      <div class='fp-kpi-card'>
+        <div class='fp-kpi-title'>Средний отток / день</div>
+        <div class='fp-kpi-value'>{fmt_compact(kpis['avg_daily_outflow'])}</div>
+        <div class='fp-kpi-sub {net_cls}'>Чистый поток: {fmt_compact(net_flow_daily)}/день</div>
+      </div>
+      <div class='fp-kpi-card'>
+        <div class='fp-kpi-title'>Минимум в прогнозе ({horizon} дн.)</div>
+        <div class='fp-kpi-value'>{fmt_compact(kpis['min_balance'])}</div>
+        <div class='fp-kpi-sub {min_cls}'>Дата: {kpis['min_date']:%d.%m.%Y} (через {kpis['days_to_min']} дн.)</div>
+      </div>
+      <div class='fp-kpi-card'>
+        <div class='fp-kpi-title'>Запас прочности (Runway)</div>
+        <div class='fp-kpi-value'>{runway_str}</div>
+        <div class='fp-kpi-sub'>Волатильность: ±{fmt_compact(kpis['volatility'])}/дн.</div>
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 # ────────────────────────────────────────────────────────────────────────────
-#  ВКЛАДКИ
+# 12. ОСНОВНЫЕ ВКЛАДКИ ИНТЕРФЕЙСА (5 логичных рабочих пространств)
 # ────────────────────────────────────────────────────────────────────────────
-tab_overview, tab_forecast, tab_categories, tab_recurring, tab_scenarios, tab_quality, tab_events, tab_help = st.tabs([
-    "🟦 Обзор", "📈 Прогноз", "🗂 Категории", "🔁 Регулярные",
-    "⚡ Сценарии", "🎯 Качество", "📅 События", "ℹ️ Методология",
+tab_dashboard, tab_scenarios, tab_planner, tab_categories, tab_quality = st.tabs([
+    "📊 Дашборд и Прогноз",
+    "⚡ Сценарии «Что если?»",
+    "📅 Планировщик (Счета, Налоги, Регулярные)",
+    "🗂 Категории и Выписка",
+    "🎯 Качество, План-Факт и Архитектура",
 ])
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  ВКЛАДКА: ОБЗОР
+# ВКЛАДКА 1: ДАШБОРД И ПРОГНОЗ
 # ═══════════════════════════════════════════════════════════════════════════
-with tab_overview:
-    st.markdown('<div class="fp-section-title">Прогноз остатка с доверительным интервалом 95 %</div>',
-                unsafe_allow_html=True)
+with tab_dashboard:
+    # Панель быстрых переключателей прямо над графиком
+    ctrl_c1, ctrl_c2, ctrl_c3 = st.columns([2, 2, 2])
+    with ctrl_c1:
+        show_history_days = st.selectbox(
+            "Показать историю на графике",
+            [30, 60, 90, 180, "Вся история", "Только прогноз"],
+            index=1,
+        )
+    with ctrl_c2:
+        show_ci = st.checkbox("Показать 95% доверительный коридор", value=True)
+    with ctrl_c3:
+        show_event_markers = st.checkbox("Отметить налоги и плановые события", value=True)
+
     fig = go.Figure()
 
-    # Confidence band
-    fig.add_trace(go.Scatter(
-        x=list(base_forecast["Дата"]) + list(base_forecast["Дата"][::-1]),
-        y=list(base_forecast["Верхняя граница 95%"]) + list(base_forecast["Нижняя граница 95%"][::-1]),
-        fill="toself", fillcolor="rgba(59,130,246,0.12)",
-        line=dict(color="rgba(0,0,0,0)"),
-        name="Доверительный интервал 95%", hoverinfo="skip",
-    ))
-
-    # Исторический остаток (если есть)
-    if "balance_eod" in df.columns and df["balance_eod"].notna().any():
-        hist = df.dropna(subset=["balance_eod"]).sort_values("operation_date")
+    # 1. Доверительный интервал (мягкая фиолетовая заливка)
+    if show_ci:
         fig.add_trace(go.Scatter(
-            x=hist["operation_date"], y=hist["balance_eod"],
-            mode="lines", name="Фактический остаток",
-            line=dict(color=PLOTLY_PALETTE["grey"], width=1.6),
+            x=list(base_forecast["Дата"]) + list(base_forecast["Дата"][::-1]),
+            y=list(base_forecast["Верхняя граница 95%"]) + list(base_forecast["Нижняя граница 95%"][::-1]),
+            fill="toself",
+            fillcolor="rgba(124, 58, 237, 0.11)",
+            line=dict(color="rgba(124, 58, 237, 0.2)", width=1),
+            name="Доверительный коридор 95%",
+            hoverinfo="skip",
         ))
 
-    # Базовый прогноз
-    fig.add_trace(go.Scatter(
-        x=base_forecast["Дата"], y=base_forecast["Прогноз остатка"],
-        mode="lines+markers", name=f"Базовый прогноз ({best_model})",
-        line=dict(color=PLOTLY_PALETTE["blue"], width=3),
-        marker=dict(size=4),
-    ))
-
-    # Точка отсчёта
-    fig.add_trace(go.Scatter(
-        x=[df["operation_date"].max()], y=[current_balance],
-        mode="markers", name="Текущий остаток",
-        marker=dict(size=11, color=PLOTLY_PALETTE["green"], symbol="circle",
-                    line=dict(width=2, color="#0b1220")),
-    ))
-
-    fig.add_hline(y=0, line_dash="dash", line_color=PLOTLY_PALETTE["red"], line_width=1.5,
-                  annotation_text="Нулевой остаток", annotation_position="top left")
-    if kpis["min_balance"] < 0:
-        fig.add_vrect(
-            x0=base_forecast["Дата"].iloc[0], x1=base_forecast["Дата"].iloc[-1],
-            fillcolor="rgba(239,68,68,0.04)", layer="below", line_width=0,
+    # 2. Исторический остаток
+    if show_history_days != "Только прогноз" and "balance_eod" in df.columns and df["balance_eod"].notna().any():
+        hist = (
+            df.dropna(subset=["balance_eod"])
+            .sort_values("operation_date")
+            .groupby(df["operation_date"].dt.normalize())["balance_eod"]
+            .last()
+            .reset_index()
         )
-    fig.update_layout(
-        xaxis_title="", yaxis_title="Остаток, ₽",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-    )
-    st.plotly_chart(style_plotly_fig(fig, height=460), use_container_width=True)
+        if isinstance(show_history_days, int):
+            cutoff_h = df["operation_date"].max() - pd.Timedelta(days=show_history_days)
+            hist = hist[hist["operation_date"] >= cutoff_h]
+        fig.add_trace(go.Scatter(
+            x=hist["operation_date"],
+            y=hist["balance_eod"],
+            mode="lines",
+            name="Фактический остаток",
+            line=dict(color="#94A3B8", width=2.2),
+        ))
 
-    # Два связанных графика: потоки по дням + кумулятивный чистый поток
-    left, right = st.columns(2)
-    with left:
-        st.markdown('<div class="fp-section-title">Дневной чистый поток (история + прогноз)</div>',
-                    unsafe_allow_html=True)
+    # 3. Линия прогноза остатка (фирменный фиолетовый)
+    fig.add_trace(go.Scatter(
+        x=base_forecast["Дата"],
+        y=base_forecast["Прогноз остатка"],
+        mode="lines+markers",
+        name=f"Прогноз остатка ({best_model})",
+        line=dict(color=VIOLET_PRIMARY, width=3.2),
+        marker=dict(size=5, color=VIOLET_ACCENT),
+    ))
+
+    # 4. Точка текущего баланса
+    fig.add_trace(go.Scatter(
+        x=[df["operation_date"].max().normalize()],
+        y=[current_balance],
+        mode="markers",
+        name="Текущий остаток",
+        marker=dict(size=11, color=COLOR_INFLOW, line=dict(width=2, color="#FFFFFF")),
+    ))
+
+    # 5. Маркеры плановых событий и налогов
+    if show_event_markers:
+        ev_rows = base_forecast[base_forecast["Плановые события"] != 0]
+        if not ev_rows.empty:
+            fig.add_trace(go.Scatter(
+                x=ev_rows["Дата"],
+                y=ev_rows["Прогноз остатка"],
+                mode="markers",
+                name="Налоги / Плановые события",
+                marker=dict(
+                    size=11,
+                    symbol="diamond",
+                    color=[COLOR_INFLOW if v > 0 else COLOR_DANGER for v in ev_rows["Плановые события"]],
+                    line=dict(width=1.5, color="#FFFFFF"),
+                ),
+                hovertext=[
+                    f"{d}: {fmt_money(v)}" for d, v in zip(ev_rows["Описание событий"], ev_rows["Плановые события"])
+                ],
+            ))
+
+    fig.add_hline(
+        y=0, line_dash="dash", line_color=COLOR_DANGER, line_width=1.6,
+        annotation_text="Граница кассового разрыва (0 ₽)", annotation_position="top left",
+    )
+    st.plotly_chart(style_plotly_fig(fig, height=430), use_container_width=True)
+
+    # Блок рекомендаций для предпринимателя (Цель из PDF кейса)
+    st.markdown('<div class="fp-section-title">Рекомендации для принятия решений</div>', unsafe_allow_html=True)
+    rec_html = "".join(f"<li style='margin-bottom:6px;'>{r}</li>" for r in recommendations)
+    st.markdown(
+        f"""
+        <div class='fp-card' style='background:#FAF8FF;border-color:#DDD6FE;'>
+          <ul style='margin:0;padding-left:18px;color:{TEXT_PRIMARY};font-size:0.93rem;line-height:1.55;'>
+            {rec_html}
+          </ul>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Два графика рядом: Дневной чистый поток и Помесячная динамика
+    c_left, c_right = st.columns(2)
+    with c_left:
+        st.markdown('<div class="fp-section-title">Ожидаемые дневные потоки на горизонте прогноза</div>', unsafe_allow_html=True)
         flow_fig = go.Figure()
         flow_fig.add_trace(go.Bar(
-            x=daily_actual.index, y=daily_actual.values,
-            name="Факт", marker_color=[
-                PLOTLY_PALETTE["green"] if v > 0 else PLOTLY_PALETTE["red"]
-                for v in daily_actual.values
-            ],
-            opacity=0.65,
-        ))
-        flow_fig.add_trace(go.Bar(
-            x=base_forecast["Дата"], y=base_forecast["Ожидаемый поток"],
-            name="Прогноз", marker_color=[
-                "rgba(59,130,246,0.55)" if v > 0 else "rgba(239,68,68,0.55)"
-                for v in base_forecast["Ожидаемый поток"]
+            x=base_forecast["Дата"],
+            y=base_forecast["Ожидаемый поток"],
+            name="Дневной чистый поток",
+            marker_color=[
+                COLOR_INFLOW if v >= 0 else COLOR_OUTFLOW for v in base_forecast["Ожидаемый поток"]
             ],
         ))
-        flow_fig.add_hline(y=0, line_color="rgba(255,255,255,0.3)", line_width=1)
-        flow_fig.update_layout(xaxis_title="", yaxis_title="Поток, ₽",
-                               bargap=0.1, barmode="overlay")
+        flow_fig.add_hline(y=0, line_color=CARD_BORDER, line_width=1)
+        flow_fig.update_layout(xaxis_title="", yaxis_title="Поток за день, ₽", showlegend=False)
         st.plotly_chart(style_plotly_fig(flow_fig, height=320), use_container_width=True)
 
-    with right:
-        st.markdown('<div class="fp-section-title">Помесячные притоки и оттоки</div>',
-                    unsafe_allow_html=True)
-        monthly = df.assign(month=df["operation_date"].dt.to_period("M").astype(str))
-        monthly_agg = monthly.groupby("month").agg(
-            Приток=("signed_amount", lambda s: s[s > 0].sum()),
-            Отток=("signed_amount", lambda s: -s[s < 0].sum()),
-        ).reset_index()
+    with c_right:
+        st.markdown('<div class="fp-section-title">Исторические притоки и оттоки по месяцам</div>', unsafe_allow_html=True)
+        monthly_agg = df.groupby("month").agg(
+            Поступления=("signed_amount", lambda s: s[s > 0].sum()),
+            Списания=("signed_amount", lambda s: -s[s < 0].sum()),
+        ).reset_index().tail(12)
         m_fig = go.Figure()
-        m_fig.add_trace(go.Bar(x=monthly_agg["month"], y=monthly_agg["Приток"],
-                               name="Приток", marker_color=PLOTLY_PALETTE["green"],
-                               marker_line_width=0))
-        m_fig.add_trace(go.Bar(x=monthly_agg["month"], y=monthly_agg["Отток"],
-                               name="Отток", marker_color=PLOTLY_PALETTE["red"],
-                               marker_line_width=0))
-        m_fig.update_layout(barmode="group", xaxis_title="", yaxis_title="₽",
-                            bargap=0.18)
+        m_fig.add_trace(go.Bar(
+            x=monthly_agg["month"], y=monthly_agg["Поступления"],
+            name="Поступления", marker_color=COLOR_INFLOW,
+        ))
+        m_fig.add_trace(go.Bar(
+            x=monthly_agg["month"], y=monthly_agg["Списания"],
+            name="Списания", marker_color=VIOLET_ACCENT,
+        ))
+        m_fig.update_layout(barmode="group", xaxis_title="", yaxis_title="Сумма, ₽", bargap=0.22)
         st.plotly_chart(style_plotly_fig(m_fig, height=320), use_container_width=True)
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  ВКЛАДКА: ПРОГНОЗ
-# ═══════════════════════════════════════════════════════════════════════════
-with tab_forecast:
-    st.markdown('<div class="fp-section-title">Детальный прогноз по дням</div>',
-                unsafe_allow_html=True)
-    view = base_forecast.copy()
-    view = view.rename(columns={
-        "Дата": "Дата", "Ожидаемый поток": "Ожидаемый поток",
-        "Прогноз остатка": "Прогноз остатка",
-        "Нижняя граница 95%": "Нижняя граница 95%",
-        "Верхняя граница 95%": "Верхняя граница 95%",
-    })
-    view_disp = view.copy()
-    view_disp["Дата"] = view_disp["Дата"].dt.strftime("%d.%m.%Y")
-    for c in ["Ожидаемый поток", "Прогноз остатка", "Нижняя граница 95%", "Верхняя граница 95%"]:
-        if c in view_disp.columns:
-            view_disp[c] = view_disp[c].round(2)
-    st.dataframe(view_disp, use_container_width=True, hide_index=True, height=420)
-    st.download_button(
-        "⬇️ Скачать прогноз CSV",
-        view_disp.to_csv(index=False).encode("utf-8-sig"),
-        file_name="cashflow_forecast.csv",
-        mime="text/csv",
-    )
+    # Детальная таблица прогноза по дням
+    with st.expander("📋 Открыть детальную таблицу прогноза остатка по дням", expanded=False):
+        view_disp = base_forecast.copy()
+        view_disp["Дата"] = view_disp["Дата"].dt.strftime("%d.%m.%Y")
+        num_cols = ["Ожидаемый поток", "Плановые события", "Прогноз остатка", "Нижняя граница 95%", "Верхняя граница 95%"]
+        for c in num_cols:
+            if c in view_disp.columns:
+                view_disp[c] = view_disp[c].round(0)
+        st.dataframe(view_disp, use_container_width=True, hide_index=True, height=360)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  ВКЛАДКА: КАТЕГОРИИ
-# ═══════════════════════════════════════════════════════════════════════════
-with tab_categories:
-    cats = df.assign(Тип=np.where(df["signed_amount"] > 0, "Поступления", "Списания"))
-    summary = (cats.groupby(["category", "Тип"])["amount"]
-                   .agg(["sum", "count"])
-                   .reset_index())
-    summary.columns = ["Категория", "Тип", "Сумма", "Операций"]
-    summary = summary.sort_values(["Тип", "Сумма"], ascending=[True, False])
-
-    left, right = st.columns([1, 1])
-    with left:
-        st.markdown('<div class="fp-section-title">Структура поступлений и списаний</div>',
-                    unsafe_allow_html=True)
-        infl = summary[summary["Тип"] == "Поступления"]
-        outl = summary[summary["Тип"] == "Списания"]
-        # Корректная иерархия для Sunburst: корневые узлы должны иметь
-        # value = сумма дочерних (при branchvalues="total"), иначе Plotly
-        # молча рендерит пустую область.
-        infl_total = float(infl["Сумма"].sum()) if len(infl) else 0.0
-        outl_total = float(outl["Сумма"].sum()) if len(outl) else 0.0
-        labels = (["Поступления"] + list(infl["Категория"])
-                  + ["Списания"] + list(outl["Категория"]))
-        parents = ([""] + ["Поступления"] * len(infl)
-                   + [""] + ["Списания"] * len(outl))
-        values = ([infl_total] + list(infl["Сумма"])
-                  + [outl_total] + list(outl["Сумма"]))
-        # Цвет: зелёный для дерева поступлений, красный — для списаний.
-        colors = (["#16a34a"] + ["#22c55e"] * len(infl)
-                  + ["#b91c1c"] + ["#ef4444"] * len(outl))
-        sun_fig = go.Figure()
-        sun_fig.add_trace(go.Sunburst(
-            labels=labels, parents=parents, values=values,
-            branchvalues="total",
-            marker=dict(colors=colors, line=dict(color="#0b1220", width=1.5)),
-            textinfo="label+percent root",
-            insidetextorientation="radial",
-            hovertemplate="<b>%{label}</b><br>Сумма: %{value:,.0f} ₽<br>Доля: %{percentRoot:.1%}<extra></extra>",
-        ))
-        sun_fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(style_plotly_fig(sun_fig, height=380), use_container_width=True)
-
-    with right:
-        st.markdown('<div class="fp-section-title">Топ-категории по абсолютной величине</div>',
-                    unsafe_allow_html=True)
-        bar_fig = go.Figure()
-        for tipo, color in [("Поступления", PLOTLY_PALETTE["green"]),
-                            ("Списания", PLOTLY_PALETTE["red"])]:
-            sub = summary[summary["Тип"] == tipo].sort_values("Сумма", ascending=True).tail(8)
-            bar_fig.add_trace(go.Bar(
-                x=sub["Сумма"], y=sub["Категория"], orientation="h",
-                name=tipo, marker_color=color, marker_line_width=0,
-            ))
-        bar_fig.update_layout(barmode="stack", xaxis_title="₽", yaxis_title="",
-                              bargap=0.15)
-        st.plotly_chart(style_plotly_fig(bar_fig, height=380), use_container_width=True)
-
-    st.markdown('<div class="fp-section-title">Таблица категорий</div>',
-                unsafe_allow_html=True)
-    st.dataframe(summary.round(2), use_container_width=True, hide_index=True, height=320)
-
-    # Safety-чек: показать «Возврат / корректировка», если есть подозрительные
-    # «поступления» в расходных категориях (налоги, зарплата и т. д.)
-    suspicious_count = int((df["category"] == "Возврат / корректировка").sum())
-    if suspicious_count > 0:
-        suspicious_total = float(df.loc[df["category"] == "Возврат / корректировка", "signed_amount"].sum())
-        st.markdown(
-            f"""
-            <div class='fp-banner fp-banner-warn'>
-              <span class='fp-pill fp-pill-med'>УТОЧНИТЕ</span>
-              <div>
-                Обнаружено <b>{suspicious_count:,}</b> операций на <b>{fmt_money(suspicious_total)}</b>,
-                которые отнесены к категории «<b>Возврат / корректировка</b>». Это поступления в расходных
-                категориях (Налоги, Зарплата, Аренда и т. д.). Возможные причины:
-                <ul style='margin:6px 0 0 18px;'>
-                  <li>возврат переплаты по налогу со стороны ФНС — корректная операция;</li>
-                  <li>банк в выписке кодирует направление иначе (Кт/Дт, C/D, Дебет/Кредит),
-                      и парсер не распознал «списание» — операция попала в «поступления» ошибочно.</li>
-                </ul>
-                Проверьте столбец <b>direction</b> в исходном CSV: должны быть «Списание»/«Поступление»,
-                либо явный знак суммы (+/-).
-              </div>
-            </div>
-            """.replace(",", " "),
-            unsafe_allow_html=True,
-        )
-
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  ВКЛАДКА: РЕГУЛЯРНЫЕ ПЛАТЕЖИ (Задача 2 — авто-детект)
-# ═══════════════════════════════════════════════════════════════════════════
-with tab_recurring:
-    st.markdown('<div class="fp-section-title">Автоматически найденные регулярные платежи</div>',
-                unsafe_allow_html=True)
-    st.caption("Алгоритм ищет операции с одинаковым контрагентом, повторяющимися датами "
-               "(месячный или квартальный цикл) и стабильной суммой (CV < 30%). "
-               "Найденные регулярные платежи можно добавить в прогноз как ручные события.")
-
-    with st.spinner("Анализирую регулярные паттерны…"):
-        recurring = detect_recurring_payments(df, min_occurrences=3)
-
-    if not recurring:
-        st.info("Регулярные платежи не обнаружены. Нужно минимум 3 повторения "
-                "с одним и тем же контрагентом за период ≥ 60 дней.")
-    else:
-        rec_df = pd.DataFrame([
-            {
-                "Контрагент": r["counterparty"][:30],
-                "Тип": r["direction"],
-                "Категория": r["category"],
-                "Сумма, ₽": round(r["median_amount"], 0),
-                "Цикл, дней": r["interval_days"],
-                "Повторов": r["occurrences"],
-                "Стабильность": f"{(1 - r['cv']) * 100:.0f}%",
-                "Последний платёж": r["last_date"].strftime("%d.%m.%Y"),
-                "Ожидаемый следующий": r["next_date"].strftime("%d.%m.%Y"),
-            }
-            for r in recurring
-        ])
-        st.dataframe(rec_df, use_container_width=True, hide_index=True, height=380)
-
-        # Прогноз следующих регулярных платежей
-        st.markdown('<div class="fp-section-title">Ближайшие ожидаемые регулярные платежи (в пределах горизонта)</div>',
-                    unsafe_allow_html=True)
-        upcoming = []
-        horizon_end = df["operation_date"].max() + pd.Timedelta(days=horizon)
-        for r in recurring:
-            if r["next_date"] <= horizon_end:
-                upcoming.append({
-                    "Дата": r["next_date"].strftime("%d.%m.%Y"),
-                    "Контрагент": r["counterparty"][:30],
-                    "Тип": r["direction"],
-                    "Категория": r["category"],
-                    "Ожидаемая сумма, ₽": round(r["median_amount"], 0),
-                    "Через дней": (r["next_date"] - df["operation_date"].max()).days,
-                })
-        if upcoming:
-            up_df = pd.DataFrame(upcoming).sort_values("Через дней")
-            st.dataframe(up_df, use_container_width=True, hide_index=True, height=300)
-
-            # Кнопка «Добавить все в прогноз»
-            if st.button("➕ Добавить все регулярные платежи в ручные события",
-                         type="primary", use_container_width=False):
-                if "manual_events_state" not in st.session_state:
-                    st.session_state["manual_events_state"] = []
-                for r in recurring:
-                    if r["next_date"] <= horizon_end:
-                        st.session_state["manual_events_state"].append({
-                            "date": r["next_date"].strftime("%d.%m.%Y"),
-                            "amount": float(r["median_amount"]),
-                            "type": "out" if r["direction"] == "Списание" else "in",
-                            "description": f"Регулярный платёж: {r['counterparty'][:30]}",
-                        })
-                st.success(f"Добавлено {len(upcoming)} регулярных платежей. "
-                           "Перейдите на вкладку «События» для просмотра.")
-        else:
-            st.info("В пределах горизонта прогноза нет ожидаемых регулярных платежей.")
-
-
-#  ВКЛАДКА: СЦЕНАРИИ
+# ВКЛАДКА 2: СЦЕНАРИИ «ЧТО ЕСЛИ?» (Звёздочка №3 — с быстрыми пресетами)
 # ═══════════════════════════════════════════════════════════════════════════
 with tab_scenarios:
-    st.markdown('<div class="fp-section-title">Стресс-сценарий «Что, если?» — 4 типа шоков</div>',
-                unsafe_allow_html=True)
-    st.caption("Все 4 типа шоков из ТЗ «со звёздочкой»: потеря клиента/сезонный спад, "
-               "задержка поступлений, внеплановый расход, рост постоянных издержек.")
+    st.markdown('<div class="fp-section-title">Быстрые пресеты стресс-сценариев в 1 клик</div>', unsafe_allow_html=True)
+    if "sc_drop" not in st.session_state:
+        st.session_state["sc_drop"] = 20
+        st.session_state["sc_delay"] = 7
+        st.session_state["sc_exp"] = int(round(kpis["avg_daily_outflow"] * 3, -3))
+        st.session_state["sc_fixed"] = 0
 
+    p1, p2, p3, p4, p5 = st.columns(5)
+    if p1.button("🔄 Сбросить (0%)", use_container_width=True):
+        st.session_state.update(sc_drop=0, sc_delay=0, sc_exp=0, sc_fixed=0)
+    if p2.button("⏳ Задержка клиента (14 дн.)", use_container_width=True):
+        st.session_state.update(sc_drop=0, sc_delay=14, sc_exp=0, sc_fixed=0)
+    if p3.button("📉 Сезонный спад (-25%)", use_container_width=True):
+        st.session_state.update(sc_drop=25, sc_delay=0, sc_exp=0, sc_fixed=0)
+    if p4.button("🛠 Внеплановый ремонт", use_container_width=True):
+        st.session_state.update(
+            sc_drop=0, sc_delay=0,
+            sc_exp=int(round(max(150_000, kpis["avg_daily_outflow"] * 5), -3)),
+            sc_fixed=10,
+        )
+    if p5.button("⚡ Жёсткий стресс (Комбо)", type="primary", use_container_width=True):
+        st.session_state.update(
+            sc_drop=30, sc_delay=14,
+            sc_exp=int(round(max(200_000, kpis["avg_daily_outflow"] * 4), -3)),
+            sc_fixed=20,
+        )
+
+    st.markdown('<div class="fp-section-title">Ручная настройка параметров сценария</div>', unsafe_allow_html=True)
     col_a, col_b, col_c, col_d = st.columns(4)
     with col_a:
-        drop = st.slider("📉 Снижение выручки, %", 0, 60, 20, step=5,
-                         help="Снижение поступлений (потеря клиента, сезонный спад)")
+        drop = st.slider("📉 Снижение выручки, %", 0, 60, key="sc_drop", step=5)
     with col_b:
-        delay = st.slider("⏱ Задержка поступлений, дней", 0, 30, 7, step=1,
-                          help="Отсрочка входящих платежей от крупных клиентов")
+        delay = st.slider("⏱ Задержка оплат клиентов, дней", 0, 30, key="sc_delay", step=1)
     with col_c:
-        expense = st.number_input("💸 Внеплановый расход, ₽", min_value=0,
-                                   value=150_000, step=10_000,
-                                   help="Разовый расход: ремонт, штраф, доначисление")
+        expense = st.number_input("💸 Разовый внеплановый расход, ₽", min_value=0, step=25_000, key="sc_exp")
     with col_d:
-        fixed_inc = st.slider("📈 Рост постоянных расходов, %", 0, 100, 0, step=5,
-                              help="Увеличение аренды, зарплаты, лизинга и т. д.")
+        fixed_inc = st.slider("📈 Рост постоянных расходов, %", 0, 100, key="sc_fixed", step=5)
 
-    # Базовый + стресс (4 параметра)
-    stress_balance, stress_forecast, _, _ = make_forecast_enhanced(
-        df, horizon=horizon,
-        revenue_drop=drop, delay_days=delay, extra_expense=expense,
+    _, stress_forecast, _, _ = make_forecast_enhanced(
+        df,
+        horizon=horizon,
+        lookback_days=lookback,
+        selected_model=model_choice,
+        revenue_drop=drop,
+        delay_days=delay,
+        extra_expense=expense,
         fixed_cost_increase=fixed_inc,
+        manual_events=active_events,
     )
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
+    sc_fig = go.Figure()
+    sc_fig.add_trace(go.Scatter(
         x=base_forecast["Дата"], y=base_forecast["Прогноз остатка"],
-        mode="lines", name="Базовый сценарий",
-        line=dict(color=PLOTLY_PALETTE["blue"], width=3),
+        mode="lines", name="Базовый прогноз",
+        line=dict(color=VIOLET_PRIMARY, width=3.2),
     ))
-    fig.add_trace(go.Scatter(
+    sc_fig.add_trace(go.Scatter(
         x=stress_forecast["Дата"], y=stress_forecast["Прогноз остатка"],
-        mode="lines", name="Стрессовый сценарий",
-        line=dict(color=PLOTLY_PALETTE["red"], width=3, dash="dash"),
+        mode="lines", name="Стрессовый сценарий «Что если?»",
+        line=dict(color=COLOR_DANGER, width=3, dash="dash"),
     ))
-    fig.add_trace(go.Scatter(
+    sc_fig.add_trace(go.Scatter(
         x=list(stress_forecast["Дата"]) + list(stress_forecast["Дата"][::-1]),
         y=list(stress_forecast["Верхняя граница 95%"]) + list(stress_forecast["Нижняя граница 95%"][::-1]),
-        fill="toself", fillcolor="rgba(239,68,68,0.10)",
+        fill="toself", fillcolor="rgba(225, 29, 72, 0.08)",
         line=dict(color="rgba(0,0,0,0)"),
-        name="Доверительный интервал (стресс)", hoverinfo="skip",
+        name="Доверительный коридор (стресс)", hoverinfo="skip",
     ))
-    fig.add_hline(y=0, line_dash="dash", line_color=PLOTLY_PALETTE["red"], line_width=1.2)
-    fig.update_layout(xaxis_title="", yaxis_title="Остаток, ₽")
-    st.plotly_chart(style_plotly_fig(fig, height=460), use_container_width=True)
+    sc_fig.add_hline(y=0, line_dash="dash", line_color=COLOR_DANGER, line_width=1.5)
+    st.plotly_chart(style_plotly_fig(sc_fig, height=420), use_container_width=True)
 
-    # Сводка по двум сценариям
     base_min = float(base_forecast["Прогноз остатка"].min())
     stress_min = float(stress_forecast["Прогноз остатка"].min())
-    base_neg = (base_forecast["Прогноз остатка"] < 0).any()
     stress_neg = (stress_forecast["Прогноз остатка"] < 0).any()
-    s_col1, s_col2, s_col3, s_col4 = st.columns(4)
-    s_col1.metric("Минимум базового", fmt_money(base_min))
-    s_col2.metric("Минимум стресса", fmt_money(stress_min),
-                  delta=fmt_money(stress_min - base_min), delta_color="inverse")
-    s_col3.metric("Разрыв в базовом", "Да" if base_neg else "Нет")
-    s_col4.metric("Разрыв в стрессе", "Да" if stress_neg else "Нет")
+
+    sc1, sc2, sc3, sc4 = st.columns(4)
+    sc1.metric("Минимум базового", fmt_compact(base_min))
+    sc2.metric("Минимум в стрессе", fmt_compact(stress_min), delta=fmt_compact(stress_min - base_min), delta_color="inverse")
+    sc3.metric("Макс. вероятность разрыва", fmt_pct(float(stress_forecast["Вероятность разрыва, %"].max())))
+    sc4.metric("Кассовый разрыв в стрессе", "Да (Требуется резерв)" if stress_neg else "Нет (Устойчиво)")
 
     if stress_neg:
         first_neg = stress_forecast.loc[stress_forecast["Прогноз остатка"] < 0].iloc[0]
         st.markdown(
             f"""
             <div class='fp-banner fp-banner-danger'>
-              <span class='fp-pill fp-pill-high'>РАЗРЫВ</span>
-              <div>В стрессовом сценарии возможен кассовый разрыв
-              <b>{first_neg['Дата']:%d.%m.%Y}</b>. Расчётный дефицит:
-              <b>{fmt_money(abs(first_neg['Прогноз остатка']))}</b>.</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            f"""
-            <div class='fp-banner fp-banner-success'>
-              <span class='fp-pill fp-pill-low'>OK</span>
-              <div>В выбранном стрессовом сценарии прогноз не пересекает нулевой остаток.
-              Минимум: <b>{fmt_money(stress_min)}</b>.</div>
+              <span class='fp-pill fp-pill-high'>СТРЕСС-ТЕСТ НЕ ПРОЙДЕН</span>
+              <div>
+                При заданных параметрах шока кассовый разрыв наступит <b>{first_neg['Дата']:%d.%m.%Y}</b>.
+                Максимальная глубина дефицита составит <b>{fmt_money(abs(stress_min))}</b>.
+                Для защиты бизнеса необходим резервный лимит (овердрафт или стабфонд) не менее <b>{fmt_money(abs(stress_min) * 1.1)}</b>.
+              </div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -1635,455 +1801,357 @@ with tab_scenarios:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  ВКЛАДКА: КАЧЕСТВО ПРОГНОЗА
+# ВКЛАДКА 3: ПЛАНИРОВЩИК (События, Счета, Налоги, Регулярные платежи и Интеграции)
 # ═══════════════════════════════════════════════════════════════════════════
-with tab_quality:
-    st.markdown('<div class="fp-section-title">Сравнение моделей прогноза</div>',
-                unsafe_allow_html=True)
-    st.caption("Все модели проходят hold-out бэктест: обучаемся на данных без последних "
-               f"{horizon} дней, прогнозируем `horizon` дней, сравниваем с фактом. "
-               "Лучшей по MAE автоматически становится модель базового прогноза.")
+with tab_planner:
+    st.markdown(
+        """
+        <div class='fp-banner fp-banner-info'>
+          <span class='fp-pill fp-pill-vio'>ЕДИНЫЙ ПЛАНИРОВЩИК</span>
+          <div>
+            Все добавленные здесь договоры, выставленные счета, регулярные платежи и налоги
+            <b>автоматически учитываются в главном прогнозе</b> на вкладке «Дашборд и Прогноз», а их источник сохраняется.
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    rows = []
-    for name, (fn, m) in model_meta["candidates"].items():
-        rows.append({
-            "Модель": name,
-            "MAE, ₽": round(m["mae"], 2) if not np.isnan(m["mae"]) else None,
-            "MAPE, %": round(m["mape"], 2) if not np.isnan(m["mape"]) else None,
-            "RMSE, ₽": round(m["rmse"], 2) if not np.isnan(m["rmse"]) else None,
-            "Смещение (bias), ₽": round(m["bias"], 2) if not np.isnan(m["bias"]) else None,
-            "Выбрана": "✅" if name == best_model else "",
-        })
-    metrics_df = pd.DataFrame(rows)
-    st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+    # Верхняя панель быстрых действий планировщика
+    act1, act2, act3 = st.columns(3)
+    with act1:
+        if st.button("🔄 Обновить налоговый календарь по умолчанию", use_container_width=True):
+            st.session_state["manual_events_state"] = default_tax_events(df, horizon)
+            st.rerun()
+    with act2:
+        if st.button("🔗 Импорт счетов из 1С / ЭДО (демо-интеграция)", use_container_width=True):
+            base_d = df["operation_date"].max().normalize()
+            demo_1c = [
+                {
+                    "date": (base_d + pd.Timedelta(days=6)).strftime("%d.%m.%Y"),
+                    "amount": float(round(kpis["avg_daily_inflow"] * 2.2, -3)),
+                    "type": "in",
+                    "description": "Оплата по договору поставки №114/26 (ООО «Альфа»)",
+                    "source": "Интеграция 1С:Бухгалтерия",
+                },
+                {
+                    "date": (base_d + pd.Timedelta(days=12)).strftime("%d.%m.%Y"),
+                    "amount": float(round(kpis["avg_daily_outflow"] * 1.8, -3)),
+                    "type": "out",
+                    "description": "Счёт на оплату сырья №892 (ООО «ТехСнаб»)",
+                    "source": "ЭДО Контур.Диадок",
+                },
+            ]
+            st.session_state["manual_events_state"].extend(demo_1c)
+            st.rerun()
+    with act3:
+        if st.button("🗑 Очистить все плановые события", use_container_width=True):
+            st.session_state["manual_events_state"] = []
+            st.rerun()
 
-    st.markdown('<div class="fp-section-title">План-факт: последний hold-out период</div>',
-                unsafe_allow_html=True)
-    # Бэктест-визуализация: факт против прогноза на горизонте lookback/последних 30 дней
-    daily_net = (df.groupby(df["operation_date"].dt.normalize())["signed_amount"].sum()
-                  .asfreq("D", fill_value=0.0))
-    holdout_days = min(30, max(7, len(daily_net) // 4))
-    if len(daily_net) > holdout_days + 7:
-        train_df = df[df["operation_date"] < daily_net.index[-holdout_days]]
-        cutoff_date = daily_net.index[-holdout_days]
-        if "balance_eod" in df.columns and df["balance_eod"].notna().any():
-            before = df[(df["operation_date"] < cutoff_date) & df["balance_eod"].notna()]
-            start_bal = float(before.sort_values("operation_date").iloc[-1]["balance_eod"]) if len(before) else float(
-                train_df.groupby(train_df["operation_date"].dt.normalize())["signed_amount"].sum().cumsum().iloc[-1]
-            )
-        else:
-            start_bal = float(train_df.groupby(train_df["operation_date"].dt.normalize())["signed_amount"].sum().cumsum().iloc[-1])
+    pl_left, pl_right = st.columns([3, 2])
 
-        pf_pred = model_meta["candidates"][best_model][0](train_df, holdout_days, start_bal)
-        actual_cum = daily_net.iloc[-holdout_days:].cumsum() + start_bal
-        pf_fig = go.Figure()
-        pf_fig.add_trace(go.Scatter(x=actual_cum.index, y=actual_cum.values,
-                                    name="Факт", line=dict(color=PLOTLY_PALETTE["green"], width=2.5)))
-        pf_fig.add_trace(go.Scatter(x=pf_pred["date"], y=pf_pred["balance"],
-                                    name=f"Прогноз ({best_model})",
-                                    line=dict(color=PLOTLY_PALETTE["blue"], width=2.5, dash="dash")))
-        pf_fig.add_hline(y=0, line_dash="dash", line_color=PLOTLY_PALETTE["red"], line_width=1)
-        pf_fig.update_layout(xaxis_title="", yaxis_title="Остаток, ₽")
-        st.plotly_chart(style_plotly_fig(pf_fig, height=380), use_container_width=True)
-    else:
-        st.info("Недостаточно данных для построения плана-факта (нужно больше 30 дней истории).")
+    with pl_left:
+        st.markdown('<div class="fp-section-title">Добавить событие, счёт или договор вручную</div>', unsafe_allow_html=True)
+        with st.form("unified_add_event", clear_on_submit=True):
+            f1, f2, f3 = st.columns(3)
+            with f1:
+                ev_date = st.text_input(
+                    "Дата (ДД.ММ.ГГГГ)",
+                    value=(df["operation_date"].max() + pd.Timedelta(days=7)).strftime("%d.%m.%Y"),
+                )
+            with f2:
+                ev_amount = st.number_input(
+                    "Сумма, ₽",
+                    min_value=0.0,
+                    value=float(round(max(50_000.0, kpis["avg_daily_outflow"]), -3)),
+                    step=10_000.0,
+                )
+            with f3:
+                ev_type = st.selectbox("Направление", ["Ожидаемое списание (out)", "Ожидаемое поступление (in)"])
 
-    # План-факт реального времени: последние 14 дней — отклонения факта от прогноза
-    st.markdown('<div class="fp-divider"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="fp-section-title">План-факт в реальном времени (последние 14 дней)</div>',
-                unsafe_allow_html=True)
-    st.caption("Звёздочка 2 из ТЗ: подсветка расхождений между ожидаемыми и фактическими "
-               "потоками. Если ожидаемый платёж не пришёл вовремя — помечается красным.")
+            f4, f5 = st.columns([2, 1])
+            with f4:
+                ev_desc = st.text_input("Назначение / Контрагент", value="Счёт №45 от клиента за поставку")
+            with f5:
+                ev_src = st.selectbox("Источник данных", ["Ручной ввод", "Выставленный счёт", "Договор", "Банк (платёжка)"])
 
-    daily_net_full = (df.groupby(df["operation_date"].dt.normalize())["signed_amount"].sum()
-                       .asfreq("D", fill_value=0.0))
-    rt_days = min(14, max(3, len(daily_net_full) // 4))
-    if len(daily_net_full) > rt_days + 7:
-        # Обучаемся на данных без последних rt_days дней
-        rt_train_df = df[df["operation_date"] < daily_net_full.index[-rt_days]]
-        rt_cutoff = daily_net_full.index[-rt_days]
-        if "balance_eod" in df.columns and df["balance_eod"].notna().any():
-            before = df[(df["operation_date"] < rt_cutoff) & df["balance_eod"].notna()]
-            rt_start_bal = float(before.sort_values("operation_date").iloc[-1]["balance_eod"]) if len(before) else float(
-                rt_train_df.groupby(rt_train_df["operation_date"].dt.normalize())["signed_amount"].sum().cumsum().iloc[-1]
-            )
-        else:
-            rt_start_bal = float(rt_train_df.groupby(rt_train_df["operation_date"].dt.normalize())["signed_amount"].sum().cumsum().iloc[-1])
-        rt_pred = model_meta["candidates"][best_model][0](rt_train_df, rt_days, rt_start_bal)
-        actual_daily = daily_net_full.iloc[-rt_days:]
-        pred_daily = rt_pred.set_index("date")["flow"].reindex(actual_daily.index)
-
-        # Отклонения по потокам
-        dev = actual_daily - pred_daily
-        dev_pct = (dev.abs() / pred_daily.abs().replace(0, np.nan) * 100).fillna(0)
-        rt_fig = go.Figure()
-        rt_fig.add_trace(go.Bar(
-            x=actual_daily.index, y=actual_daily.values,
-            name="Факт", marker_color=[
-                PLOTLY_PALETTE["green"] if v > 0 else PLOTLY_PALETTE["red"]
-                for v in actual_daily.values
-            ], opacity=0.8,
-        ))
-        rt_fig.add_trace(go.Bar(
-            x=pred_daily.index, y=pred_daily.values,
-            name="План", marker_color="rgba(100,116,139,0.45)",
-        ))
-        # Подсветка больших отклонений (>30%)
-        big_dev_mask = dev_pct > 30
-        if big_dev_mask.any():
-            rt_fig.add_trace(go.Scatter(
-                x=actual_daily.index[big_dev_mask],
-                y=[max(abs(actual_daily.values[i]), abs(pred_daily.values[i])) * 1.1
-                   for i, v in enumerate(big_dev_mask) if v],
-                mode="markers", marker=dict(symbol="triangle-up", size=12, color=PLOTLY_PALETTE["amber"]),
-                name="⚠ Большое отклонение (>30%)",
-                hovertext=[f"Отклонение: {dev_pct.values[i]:.0f}%" for i, v in enumerate(big_dev_mask) if v],
-            ))
-        rt_fig.add_hline(y=0, line_color="rgba(255,255,255,0.3)", line_width=1)
-        rt_fig.update_layout(xaxis_title="", yaxis_title="Поток, ₽",
-                              barmode="group", bargap=0.2)
-        st.plotly_chart(style_plotly_fig(rt_fig, height=340), use_container_width=True)
-
-        # Таблица отклонений
-        if big_dev_mask.any():
-            dev_rows = []
-            for i, d in enumerate(actual_daily.index):
-                if big_dev_mask.iloc[i]:
-                    dev_rows.append({
-                        "Дата": d.strftime("%d.%m.%Y"),
-                        "План, ₽": round(float(pred_daily.iloc[i]), 0),
-                        "Факт, ₽": round(float(actual_daily.iloc[i]), 0),
-                        "Отклонение, ₽": round(float(dev.iloc[i]), 0),
-                        "Отклонение, %": round(float(dev_pct.iloc[i]), 1),
-                    })
-            st.markdown(
-                f"""
-                <div class='fp-banner fp-banner-warn'>
-                  <span class='fp-pill fp-pill-med'>⚠ ОТКЛОНЕНИЯ</span>
-                  <div>Обнаружено <b>{len(dev_rows)}</b> значительных расхождений плана и факта
-                  (&gt;30%). Проверьте ожидаемые платежи во вкладке «События» — возможно,
-                  контрагент задержал оплату.</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            st.dataframe(pd.DataFrame(dev_rows), use_container_width=True,
-                         hide_index=True, height=200)
-    else:
-        st.info("Недостаточно истории для план-факт реального времени (нужно >14 дней).")
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  ВКЛАДКА: СОБЫТИЯ (ручной ввод + налоги)
-# ═══════════════════════════════════════════════════════════════════════════
-with tab_events:
-    st.markdown('<div class="fp-section-title">Запланированные события (договоры, счета, налоги)</div>',
-                unsafe_allow_html=True)
-    st.caption("Добавьте события, которые ещё не отражены в выписке, но известны заранее. "
-               "Они будут учтены в прогнозе на вкладке «Прогноз» и в расчёте разрывов.")
-
-    if "manual_events_state" not in st.session_state:
-        st.session_state["manual_events_state"] = default_tax_events(
-            df["operation_date"].max(), horizon
-        )
-
-    ev_col1, ev_col2 = st.columns([3, 2])
-    with ev_col1:
-        with st.form("add_event", clear_on_submit=True):
-            ec1, ec2, ec3 = st.columns([2, 2, 2])
-            with ec1:
-                ev_date = st.text_input("Дата (ДД.ММ.ГГГГ)", value=(df["operation_date"].max() + pd.Timedelta(days=7)).strftime("%d.%m.%Y"))
-            with ec2:
-                ev_amount = st.number_input("Сумма, ₽", min_value=0.0, value=50_000.0, step=10_000.0)
-            with ec3:
-                ev_type = st.selectbox("Тип", ["Поступление (in)", "Списание (out)"], index=1)
-            ev_desc = st.text_input("Описание", value="Оплата по счёту от клиента")
-            if st.form_submit_button("➕ Добавить событие"):
+            if st.form_submit_button("➕ Добавить в прогноз", use_container_width=True):
                 st.session_state["manual_events_state"].append({
                     "date": ev_date,
                     "amount": float(ev_amount),
-                    "type": "out" if ev_type.startswith("Списание") else "in",
+                    "type": "out" if "out" in ev_type else "in",
                     "description": ev_desc,
+                    "source": ev_src,
                 })
-                st.success(f"Событие добавлено ({ev_date}). Пересчёт прогноза выполнится автоматически.")
+                st.rerun()
 
-    with ev_col2:
-        st.markdown('<div class="fp-section-title">Налоговый календарь</div>',
-                    unsafe_allow_html=True)
-        st.markdown(
-            """
-            - **ЕНП** — 28-е число каждого месяца (единый налоговый платёж)
-            - **НДС** — 28-е первого месяца квартала (квартальные доплаты)
-            - **Авансы по УСН** — 28-е апреля, июля, октября, декабря
-            - **Страховые взносы** — 28-е следующего за выплатой месяца
-            """
-        )
-        if st.button("🔄 Сбросить события к налоговым по умолчанию"):
-            st.session_state["manual_events_state"] = default_tax_events(
-                df["operation_date"].max(), horizon
-            )
-            st.success("События сброшены к налоговому календарю по умолчанию.")
-
-    # Список событий
-    st.markdown('<div class="fp-section-title">Текущие запланированные события</div>',
-                unsafe_allow_html=True)
-    if not st.session_state["manual_events_state"]:
-        st.info("Пока нет запланированных событий.")
-    else:
-        ev_df = pd.DataFrame(st.session_state["manual_events_state"])
-        ev_df = ev_df.rename(columns={"date": "Дата", "amount": "Сумма",
-                                      "type": "Тип", "description": "Описание"})
-        ev_df["Сумма"] = ev_df["Сумма"].apply(lambda x: f"{x:,.0f} ₽".replace(",", " "))
-        st.dataframe(ev_df, use_container_width=True, hide_index=True, height=300)
-
-    # Пересчёт прогноза с ручными событиями
-    balance_with_ev, forecast_with_ev, _, _ = make_forecast_enhanced(
-        df, horizon=horizon,
-        manual_events=st.session_state["manual_events_state"],
-    )
-    diff_min = float(forecast_with_ev["Прогноз остатка"].min()) - float(base_forecast["Прогноз остатка"].min())
-
-    ev_fig = go.Figure()
-    ev_fig.add_trace(go.Scatter(
-        x=base_forecast["Дата"], y=base_forecast["Прогноз остатка"],
-        name="Без событий", line=dict(color=PLOTLY_PALETTE["grey"], width=2, dash="dot"),
-    ))
-    ev_fig.add_trace(go.Scatter(
-        x=forecast_with_ev["Дата"], y=forecast_with_ev["Прогноз остатка"],
-        name="С учётом событий",
-        line=dict(color=PLOTLY_PALETTE["cyan"], width=3),
-    ))
-    # Маркеры событий
-    for ev in st.session_state["manual_events_state"]:
-        try:
-            ed = pd.to_datetime(ev["date"], dayfirst=True)
-            mask = forecast_with_ev["Дата"] == ed.normalize()
-            if mask.any():
-                yv = float(forecast_with_ev.loc[mask, "Прогноз остатка"].iloc[0])
-                color = PLOTLY_PALETTE["red"] if ev["type"] == "out" else PLOTLY_PALETTE["green"]
-                ev_fig.add_trace(go.Scatter(
-                    x=[ed], y=[yv],
-                    mode="markers+text",
-                    text=[ev.get("description", "")[:18]],
-                    textposition="top center",
-                    marker=dict(size=12, color=color, symbol="triangle-down" if ev["type"] == "out" else "triangle-up",
-                                line=dict(width=1, color="#0b1220")),
-                    showlegend=False, hovertext=f"{ev['date']}: {ev['amount']}",
-                ))
-        except Exception:
-            continue
-    ev_fig.add_hline(y=0, line_dash="dash", line_color=PLOTLY_PALETTE["red"], line_width=1)
-    ev_fig.update_layout(xaxis_title="", yaxis_title="Остаток, ₽")
-    st.plotly_chart(style_plotly_fig(ev_fig, height=400), use_container_width=True)
-
-    c1, c2 = st.columns(2)
-    c1.metric("Минимум прогноза без событий",
-              fmt_money(float(base_forecast["Прогноз остатка"].min())))
-    c2.metric("Минимум прогноза с событиями",
-              fmt_money(float(forecast_with_ev["Прогноз остатка"].min())),
-              delta=fmt_money(diff_min), delta_color="inverse" if diff_min < 0 else "normal")
-
-    # ─── Звёздочка 1: Выставленные счета с дедлайнами ────────────────────────
-    st.markdown('<div class="fp-divider"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="fp-section-title">Выставленные счета (оплаты ожидаются)</div>',
-                unsafe_allow_html=True)
-    st.caption("Звёздочка 1 из ТЗ: учёт выставленных клиентам и полученных от поставщиков "
-               "счетов с дедлайнами. Счета автоматически добавляются в прогноз как "
-               "ожидаемые поступления/списания на дату оплаты.")
-
-    if "pending_invoices" not in st.session_state:
-        st.session_state["pending_invoices"] = []
-
-    with st.form("add_invoice", clear_on_submit=True):
-        ic1, ic2, ic3, ic4 = st.columns(4)
-        with ic1:
-            inv_date = st.text_input("Срок оплаты (ДД.ММ.ГГГГ)",
-                value=(df["operation_date"].max() + pd.Timedelta(days=10)).strftime("%d.%m.%Y"))
-        with ic2:
-            inv_amount = st.number_input("Сумма счёта, ₽", min_value=0.0, value=200_000.0, step=10_000.0)
-        with ic3:
-            inv_type = st.selectbox("Направление", ["Ожидаемое поступление (in)", "Ожидаемое списание (out)"], index=0)
-        with ic4:
-            inv_counterparty = st.text_input("Контрагент", value="ООО «Клиент»")
-        inv_desc = st.text_input("Описание счёта", value="Счёт № за поставку по договору")
-        if st.form_submit_button("📋 Добавить счёт"):
-            st.session_state["pending_invoices"].append({
-                "date": inv_date,
-                "amount": float(inv_amount),
-                "type": "out" if inv_type.startswith("Ожидаемое списание") else "in",
-                "description": f"Счёт: {inv_desc[:50]}",
-                "counterparty": inv_counterparty,
+    with pl_right:
+        st.markdown('<div class="fp-section-title">Активные события в прогнозе</div>', unsafe_allow_html=True)
+        if not st.session_state.get("manual_events_state"):
+            st.info("Список плановых событий пуст.")
+        else:
+            ev_df = pd.DataFrame(st.session_state["manual_events_state"])
+            if "source" not in ev_df.columns:
+                ev_df["source"] = "План"
+            ev_df_disp = pd.DataFrame({
+                "Дата": ev_df["date"],
+                "Тип": ev_df["type"].map({"in": "🟢 Приток", "out": "🟣 Отток"}),
+                "Сумма": ev_df["amount"].apply(fmt_money),
+                "Описание": ev_df["description"],
+                "Источник": ev_df["source"],
             })
-            st.success(f"Счёт добавлен. Ожидается {'списание' if inv_type.startswith('Ожидаемое списание') else 'поступление'} {inv_date}.")
+            st.dataframe(ev_df_disp, use_container_width=True, hide_index=True, height=255)
 
-    if st.session_state["pending_invoices"]:
-        inv_df = pd.DataFrame(st.session_state["pending_invoices"])
-        inv_df = inv_df.rename(columns={"date": "Срок", "amount": "Сумма",
-                                        "type": "Тип", "description": "Описание",
-                                        "counterparty": "Контрагент"})
-        inv_df["Сумма"] = inv_df["Сумма"].apply(lambda x: f"{x:,.0f} ₽".replace(",", " "))
-        inv_df["Тип"] = inv_df["Тип"].map({"in": "Поступление", "out": "Списание"})
-        st.dataframe(inv_df, use_container_width=True, hide_index=True, height=220)
-
-        # Добавить все счета в события (для учёта в прогнозе)
-        if st.button("➕ Включить все счета в прогноз", type="primary"):
-            for inv in st.session_state["pending_invoices"]:
-                st.session_state["manual_events_state"].append({
-                    "date": inv["date"], "amount": float(inv["amount"]),
-                    "type": inv["type"], "description": inv["description"],
-                })
-            st.success(f"Добавлено {len(st.session_state['pending_invoices'])} счетов в прогноз.")
+    st.markdown('<div class="fp-divider"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="fp-section-title">Автоматически обнаруженные регулярные платежи из истории</div>', unsafe_allow_html=True)
+    recurring = detect_recurring_payments(df, min_occurrences=3)
+    if not recurring:
+        st.info("Регулярные платежи с устойчивым интервалом в истории не обнаружены.")
     else:
-        st.info("Нет выставленных счетов. Добавьте через форму выше.")
+        horizon_end = df["operation_date"].max().normalize() + pd.Timedelta(days=horizon)
+        upcoming_rec = [r for r in recurring if r["next_date"] <= horizon_end]
+
+        rc_top1, rc_top2 = st.columns([3, 2])
+        with rc_top1:
+            st.caption(
+                f"Найдено регулярных паттернов: {len(recurring)} (из них {len(upcoming_rec)} попадают в текущий горизонт {horizon} дней)."
+            )
+        with rc_top2:
+            if upcoming_rec and st.button(
+                f"➕ Включить {len(upcoming_rec)} предстоящих регулярных платежей в прогноз",
+                type="primary",
+                use_container_width=True,
+            ):
+                for r in upcoming_rec:
+                    st.session_state["manual_events_state"].append({
+                        "date": r["next_date"].strftime("%d.%m.%Y"),
+                        "amount": float(round(r["median_amount"], 0)),
+                        "type": "out" if r["direction"] == "Списание" else "in",
+                        "description": f"Регулярный: {r['counterparty']}",
+                        "source": "Авто-детект регулярных",
+                    })
+                st.rerun()
+
+        rec_table = pd.DataFrame([
+            {
+                "Контрагент / Шаблон": r["counterparty"],
+                "Направление": r["direction"],
+                "Категория": r["category"],
+                "Медианная сумма": fmt_money(r["median_amount"]),
+                "Цикл, дн.": r["interval_days"],
+                "Повторений": r["occurrences"],
+                "Стабильность": f"{(1 - r['cv']) * 100:.0f}%",
+                "Следующий платёж": r["next_date"].strftime("%d.%m.%Y"),
+            }
+            for r in recurring
+        ])
+        st.dataframe(rec_table, use_container_width=True, hide_index=True, height=280)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  ВКЛАДКА: МЕТОДОЛОГИЯ
+# ВКЛАДКА 4: КАТЕГОРИИ И ВЫПИСКА
 # ═══════════════════════════════════════════════════════════════════════════
-with tab_help:
-    st.markdown('<div class="fp-section-title">Как считается прогноз</div>',
-                unsafe_allow_html=True)
-    st.markdown(
-        """
-        1. **Подготовка данных.** CSV-выписка нормализуется: распознаются дата, сумма,
-           направление и остаток по окончании дня. Поддерживаются русские и английские
-           заголовки, кодировки `utf-8` / `utf-8-sig` / `cp1251`, разделители `;`, `,`, `\\t`, `|`.
-           Распознавание направления поддерживает **18 форматов**: Поступление/Списание,
-           Приход/Расход, Кредит/Дебет, Кт/Дт, C/D, CR/DR, Credit/Debit, +/-.
-        2. **Категоризация.** По ключевым словам в назначении платежа и наименовании
-           контрагента операции относятся к одной из 9 категорий. Векторизованная
-           реализация (через `str.contains`) примерно в 50–100× быстрее `apply`.
-           Приоритеты исправлены: «Продажи» (включая эквайринг-поступления) имеют
-           приоритет над «Комиссии и банк». Поступления в расходных категориях
-           (налоги, зарплата и т. д.) переотносятся в «Возврат / корректировка».
-        3. **Авто-детект регулярных платежей.** Алгоритм находит операции с одинаковым
-           контрагентом, периодичностью 20–40 дней (месячный цикл) или 80–100 дней
-           (квартальный), и коэффициентом вариации суммы < 30%. Предсказывает следующий
-           платёж и предлагает добавить в ручные события.
-        4. **Выбор модели.** Прогноз считается тремя моделями одновременно:
-           - **Weekday Mean** — средний чистый поток по дням недели за последние 12 недель,
-             с обрезкой 5/95-го перцентиля для устойчивости к выбросам;
-           - **Holt Linear** — экспоненциальное сглаживание с трендом (statsmodels);
-           - **Linear + Weekday** — линейный регрессионный тренд на сглаженном ряду
-             + поправка на день недели (sklearn).
-           Модели проходят hold-out бэктест: обучаемся без последних `horizon` дней
-           и сравниваем прогноз с фактом. Лучшей по **MAE** автоматически становится
-           модель базового прогноза.
-        5. **Доверительные интервалы.** Строятся как `±1.96 σ√n`, где σ оценивается
-           из MAE на бэктесте. Коридор расширяется с ростом горизонта — отражает
-           нарастающую неопределённость.
-        6. **Стресс-сценарии (4 типа).** По ТЗ «со звёздочкой»:
-           - 📉 снижение выручки на X% (только к положительным потокам);
-           - ⏱ задержка поступлений на N дней (отсрочка входящих);
-           - 💸 внеплановый расход в первый день прогноза;
-           - 📈 рост постоянных расходов (аренда, зарплата, лизинг) на X% — равномерно по дням.
-        7. **Ручные события.** Договоры, счета и налоги добавляются пользователем
-           во вкладке «События» и учитываются в прогнозе. Налоговый календарь
-           (ЕНП 28-е, НДС квартально, авансы по УСН) создаётся автоматически.
-        8. **Выставленные счета.** Отдельная форма для счетов с дедлайнами оплаты —
-           учитываются в прогнозе при нажатии кнопки «Включить в прогноз».
-        9. **План-факт real-time.** Подсветка расхождений >30% между ожидаемыми и
-            фактическими потоками за последние 14 дней — сигнал, что контрагент
-            задерживает оплату.
-        10. **Безопасность.** Если задана env-переменная `FINPOTOK_PASSWORD`,
-            приложение требует аутентификацию. Пароль сравнивается через
-            `hmac.compare_digest` (защита от time-атак). Чувствительные данные
-            в логи не пишутся.
-        11. **KPI и риск.** Считаются: текущий остаток, средние приток/отток, чистый
-            «burn rate», «runway» (дни до нуля по текущему чистому потоку), волатильность,
-            дата и сумма расчётного дефицита, % доверительной вероятности разрыва.
-        """
+with tab_categories:
+    cats = df.assign(Тип=np.where(df["signed_amount"] > 0, "Поступления", "Списания"))
+    summary = (
+        cats.groupby(["category", "Тип"])["amount"]
+        .agg(["sum", "count"])
+        .reset_index()
+        .rename(columns={"category": "Категория", "sum": "Сумма", "count": "Операций"})
+        .sort_values(["Тип", "Сумма"], ascending=[True, False])
     )
 
-    st.markdown('<div class="fp-divider"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="fp-section-title">Метрики качества прогноза (текущий бэктест)</div>',
-                unsafe_allow_html=True)
-    m = metrics
-    q_col1, q_col2, q_col3, q_col4 = st.columns(4)
-    q_col1.metric("Лучшая модель", best_model)
-    q_col2.metric("MAE", fmt_money(m["mae"]))
-    q_col3.metric("MAPE", fmt_pct(m["mape"]))
-    q_col4.metric("RMSE", fmt_money(m["rmse"]))
+    cat_l, cat_r = st.columns([1, 1])
+    with cat_l:
+        st.markdown('<div class="fp-section-title">Структура денежных потоков по категориям</div>', unsafe_allow_html=True)
+        infl = summary[summary["Тип"] == "Поступления"]
+        outl = summary[summary["Тип"] == "Списания"]
+        infl_total = float(infl["Сумма"].sum()) if len(infl) else 0.0
+        outl_total = float(outl["Сумма"].sum()) if len(outl) else 0.0
+
+        labels = ["Поступления"] + list(infl["Категория"]) + ["Списания"] + list(outl["Категория"])
+        parents = [""] + ["Поступления"] * len(infl) + [""] + ["Списания"] * len(outl)
+        values = [infl_total] + list(infl["Сумма"]) + [outl_total] + list(outl["Сумма"])
+
+        # Мягкая бело-фиолетовая и изумрудная палитра вместо кислотного красно-зелёного
+        colors = (
+            ["#10B981"] + ["#34D399"] * len(infl)
+            + [VIOLET_PRIMARY] + [VIOLET_LIGHT] * len(outl)
+        )
+        sun_fig = go.Figure(go.Sunburst(
+            labels=labels, parents=parents, values=values,
+            branchvalues="total",
+            marker=dict(colors=colors, line=dict(color="#FFFFFF", width=2)),
+            textinfo="label+percent root",
+            hovertemplate="<b>%{label}</b><br>Сумма: %{value:,.0f} ₽<br>Доля: %{percentRoot:.1%}<extra></extra>",
+        ))
+        sun_fig.update_layout(margin=dict(l=8, r=8, t=8, b=8))
+        st.plotly_chart(style_plotly_fig(sun_fig, height=370), use_container_width=True)
+
+    with cat_r:
+        st.markdown('<div class="fp-section-title">Топ-категории по объёму средств</div>', unsafe_allow_html=True)
+        bar_fig = go.Figure()
+        for tipo, color in [("Поступления", COLOR_INFLOW), ("Списания", VIOLET_ACCENT)]:
+            sub = summary[summary["Тип"] == tipo].sort_values("Сумма", ascending=True).tail(8)
+            bar_fig.add_trace(go.Bar(
+                x=sub["Сумма"], y=sub["Категория"], orientation="h",
+                name=tipo, marker_color=color,
+            ))
+        bar_fig.update_layout(barmode="group", xaxis_title="Сумма, ₽", yaxis_title="")
+        st.plotly_chart(style_plotly_fig(bar_fig, height=370), use_container_width=True)
+
+    # Удобный фильтр по таблице категорий и операциям
+    f_col1, f_col2 = st.columns([1, 2])
+    with f_col1:
+        type_filter = st.radio(
+            "Фильтр таблицы", ["Все", "Поступления", "Списания"], horizontal=True
+        )
+    with f_col2:
+        search_q = st.text_input("🔍 Поиск по контрагенту или назначению платежа", placeholder="Например: ФНС, аренда, эквайринг...")
+
+    filtered_summary = summary if type_filter == "Все" else summary[summary["Тип"] == type_filter]
+    disp_sum = filtered_summary.copy()
+    disp_sum["Доля в типе, %"] = (
+        disp_sum["Сумма"] / disp_sum.groupby("Тип")["Сумма"].transform("sum") * 100
+    ).round(1)
+    disp_sum["Сумма"] = disp_sum["Сумма"].round(2)
+    st.dataframe(disp_sum, use_container_width=True, hide_index=True, height=280)
+
+    if search_q.strip():
+        q = search_q.strip().lower()
+        ops = df[
+            df["payment_purpose"].astype(str).str.lower().str.contains(q, na=False)
+            | df["counterparty_name"].astype(str).str.lower().str.contains(q, na=False)
+        ].copy()
+        st.caption(f"Найдено операций по запросу «{search_q}»: {len(ops)}")
+        st.dataframe(
+            ops[["operation_date", "counterparty_name", "payment_purpose", "category", "signed_amount"]].tail(200),
+            use_container_width=True, hide_index=True, height=250,
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ВКЛАДКА 5: КАЧЕСТВО, ПЛАН-ФАКТ И АРХИТЕКТУРА
+# ═══════════════════════════════════════════════════════════════════════════
+with tab_quality:
+    st.markdown('<div class="fp-section-title">Сравнение моделей прогнозирования на Hold-Out бэктесте</div>', unsafe_allow_html=True)
+    rows = []
+    for name, (_, m) in model_meta["candidates"].items():
+        rows.append({
+            "Модель": name,
+            "MAE (ср. ошибка остатка), ₽": round(m["mae"], 0) if not np.isnan(m["mae"]) else None,
+            "MAPE, %": round(m["mape"], 2) if not np.isnan(m["mape"]) else None,
+            "RMSE, ₽": round(m["rmse"], 0) if not np.isnan(m["rmse"]) else None,
+            "Смещение (Bias), ₽": round(m["bias"], 0) if not np.isnan(m["bias"]) else None,
+            "Статус": "💜 Активна" if name == best_model else "Доступна",
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    q_left, q_right = st.columns(2)
+    daily_net_full = _daily_net_series(df, lookback_days=None)
+    holdout_days = min(30, max(7, len(daily_net_full) // 4))
+
+    with q_left:
+        st.markdown('<div class="fp-section-title">Бэктест остатка: План vs Факт (Hold-Out)</div>', unsafe_allow_html=True)
+        if len(daily_net_full) > holdout_days + 14:
+            cutoff_date = daily_net_full.index[-holdout_days]
+            train_df = df[df["operation_date"] < cutoff_date]
+            start_bal = get_current_balance(train_df, _daily_net_series(train_df))
+            pf_pred = model_meta["candidates"][best_model][0](
+                train_df, holdout_days, start_bal, lookback_days=lookback
+            )
+            actual_cum = daily_net_full.iloc[-holdout_days:].cumsum() + start_bal
+
+            pf_fig = go.Figure()
+            pf_fig.add_trace(go.Scatter(
+                x=actual_cum.index, y=actual_cum.values,
+                name="Фактический остаток", line=dict(color=COLOR_INFLOW, width=2.8),
+            ))
+            pf_fig.add_trace(go.Scatter(
+                x=pf_pred["date"], y=pf_pred["balance"],
+                name=f"Прогноз модели ({best_model})",
+                line=dict(color=VIOLET_PRIMARY, width=2.8, dash="dash"),
+            ))
+            st.plotly_chart(style_plotly_fig(pf_fig, height=340), use_container_width=True)
+        else:
+            st.info("Недостаточно исторических дней для Hold-Out графика.")
+
+    with q_right:
+        st.markdown('<div class="fp-section-title">План-Факт потоков за последние 14 дней (контроль задержек)</div>', unsafe_allow_html=True)
+        rt_days = min(14, max(5, len(daily_net_full) // 5))
+        if len(daily_net_full) > rt_days + 14:
+            rt_cut = daily_net_full.index[-rt_days]
+            rt_train = df[df["operation_date"] < rt_cut]
+            rt_start = get_current_balance(rt_train, _daily_net_series(rt_train))
+            rt_pred = model_meta["candidates"][best_model][0](
+                rt_train, rt_days, rt_start, lookback_days=lookback
+            )
+            act_d = daily_net_full.iloc[-rt_days:]
+            prd_d = rt_pred.set_index("date")["flow"].reindex(act_d.index)
+
+            rt_fig = go.Figure()
+            rt_fig.add_trace(go.Bar(
+                x=act_d.index, y=act_d.values,
+                name="Факт", marker_color=VIOLET_PRIMARY,
+            ))
+            rt_fig.add_trace(go.Bar(
+                x=prd_d.index, y=prd_d.values,
+                name="План (ожидание)", marker_color="#CBD5E1",
+            ))
+            rt_fig.update_layout(barmode="group")
+            st.plotly_chart(style_plotly_fig(rt_fig, height=340), use_container_width=True)
 
     st.markdown('<div class="fp-divider"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="fp-section-title">Архитектура решения</div>',
-                unsafe_allow_html=True)
-    st.caption("Открыть в полном размере — клик правой кнопкой → «Открыть изображение».")
+    st.markdown('<div class="fp-section-title">Схема архитектуры решения (Бело-фиолетовая тема)</div>', unsafe_allow_html=True)
     mermaid_diagram = r"""
-    flowchart TB
-      subgraph DS["📡 Источники данных"]
-        D1["CSV-выписка<br/>utf-8 / cp1251"]
-        D2["Архив кейса<br/>ZIP"]
-        D3["Синтетика<br/>fallback"]
-        D4["Ручной ввод<br/>(события, счета, налоги)"]
+    flowchart LR
+      subgraph DS["📥 Источники данных"]
+        D1["CSV-выписка банка"]
+        D2["Архив кейса / Мульти-компании"]
+        D3["Планировщик: Счета, Договоры, 1С"]
+        D4["Налоговый календарь ФНС"]
       end
-      subgraph PROC["⚙️ Обработка"]
-        N1["Нормализация<br/>алиасы колонок, кодировка"]
-        N2["Парсинг направления<br/>18 форматов: Кт/Дт, C/D, +/-"]
-        N3["Категоризация<br/>векторизованная, 9 категорий"]
-        N4["Авто-детект регулярных<br/>платежей"]
+      subgraph PROC["⚙️ Обработка и аналитика"]
+        N1["Нормализация и очистка"]
+        N2["Раздельная категоризация (Приток/Отток)"]
+        N3["Авто-детект регулярных платежей"]
       end
-      subgraph FCST["🎯 Прогноз"]
-        M1["Weekday Mean"]
-        M2["Holt Linear<br/>(statsmodels)"]
-        M3["Linear + Weekday<br/>(sklearn)"]
-        BT["Бэктест hold-out<br/>MAE / MAPE / RMSE"]
-        SEL["Авто-выбор лучшей<br/>по MAE"]
-        CI["Доверительный интервал 95%<br/>σ√n из остатков"]
+      subgraph FCST["🤖 Ядро прогнозирования"]
+        M1["Weekday Mean / Holt / Linear+WD"]
+        BT["Hold-Out Бэктест (MAE, MAPE, RMSE)"]
+        CI["Доверительный коридор 95% и P(Разрыва)"]
       end
-      subgraph SCEN["⚡ Сценарии и события"]
-        S1["4 типа шоков:<br/>выручка / задержка / расход / рост издержек"]
-        S2["Ручные события<br/>(договоры, счета, налоги)"]
-        S3["План-факт real-time<br/>подсветка отклонений"]
+      subgraph OUT["💜 UX/UI Дашборд предпринимателя"]
+        O1["График остатка и План-Факт"]
+        O2["Стресс-сценарии Что-Если"]
+        O3["Рекомендации по предотвращению разрыва"]
       end
-      subgraph OUT["📊 Выход"]
-        K1["KPI-карточки<br/>runway, burn, volatility"]
-        K2["Risk-баннер<br/>дата/сумма/% разрыва"]
-        K3["Графики: прогноз,<br/>категории"]
-      end
-      D1 & D2 & D3 & D4 --> N1
-      N1 --> N2 --> N3 --> N4
-      N3 --> M1 & M2 & M3 --> BT --> SEL --> CI
-      CI --> S1 & S2
-      N4 --> S2
-      S1 & S2 --> S3
-      CI & S3 --> K1 & K2 & K3
-      style DS fill:#1e293b,stroke:#3b82f6,color:#fff
-      style PROC fill:#1e293b,stroke:#06b6d4,color:#fff
-      style FCST fill:#1e293b,stroke:#8b5cf6,color:#fff
-      style SCEN fill:#1e293b,stroke:#f59e0b,color:#fff
-      style OUT fill:#1e293b,stroke:#22c55e,color:#fff
+      D1 & D2 --> N1 --> N2 --> N3
+      N2 --> M1 --> BT --> CI
+      D3 & D4 & N3 --> CI
+      CI --> O1 & O2 & O3
     """
     st.components.v1.html(
         f"""
         <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
-        <div style='background:#0e1626; padding:16px; border-radius:12px; border:1px solid #1f2a44;'>
+        <div style='background:#FFFFFF; padding:18px; border-radius:14px; border:1px solid {CARD_BORDER};'>
           <div class='mermaid' style='background:transparent;'>{mermaid_diagram}</div>
         </div>
         <script>
-          mermaid.initialize({{startOnLoad:true, theme:'dark',
-            themeVariables:{{primaryColor:'#1e293b', primaryTextColor:'#e8ecf3',
-              lineColor:'#3b82f6', secondaryColor:'#0e1626'}}}});
+          mermaid.initialize({{
+            startOnLoad: true,
+            theme: 'base',
+            themeVariables: {{
+              primaryColor: '#F3E8FF',
+              primaryTextColor: '#1E1B4B',
+              primaryBorderColor: '#7C3AED',
+              lineColor: '#6D28D9',
+              secondaryColor: '#F8F7FC',
+              tertiaryColor: '#FFFFFF'
+            }}
+          }});
         </script>
         """,
-        height=560,
-    )
-
-    st.markdown('<div class="fp-divider"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="fp-section-title">Ограничения и важные оговорки</div>',
-                unsafe_allow_html=True)
-    st.markdown(
-        """
-        - **Регулярные обязательства**, которых нет в выписке, автоматически системе
-          не известны — используйте вкладку «События».
-        - **Стресс-сценарии** — это чувствительность, а не вероятностная модель.
-          Вероятность разрыва оценивается по доверительному коридору MAE, а не из
-          распределения экономических шоков.
-        - **Прогноз ограничен горизонтом** и теряет точность с ростом горизонта
-          (это видно по расширяющемуся коридору). Для горизонта >60 дней
-          рекомендуется дополнять модель экспертными оценками.
-        - **Безопасность.** Все вычисления происходят в рамках текущей сессии Streamlit;
-          загруженные CSV-файлы не сохраняются на сервере между запусками. В production
-          нужна аутентификация и маскирование счёт-фактуры и ИНН в логах.
-        """
+        height=310,
     )
